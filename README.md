@@ -8,7 +8,7 @@ Dockerized transcription pipeline for [Trunk Recorder](https://github.com/TrunkR
 HackRF / SDR
      │
      ▼
-Trunk Recorder ──uploadScript──▶ sdr-trunk-vtt (Docker)
+Trunk Recorder ──uploadScript──▶ trunk-recorder-vtt (Docker)
                                       │
                     ┌─────────────────┴─────────────────┐
                     ▼                                   ▼
@@ -55,8 +55,6 @@ docker compose up -d --build
 
 ### 3. Wire up Trunk Recorder
 
-Use [examples/trunk-recorder-system.json](examples/trunk-recorder-system.json) as your Trunk Recorder `config.json`. It is derived from `sdr-trunk-import.json` (Denver-Aurora multisite, dual HackRF) with VTT upload settings added.
-
 Recommended directory layout (paths in the config are relative to this folder):
 
 ```
@@ -81,7 +79,7 @@ If Trunk Recorder still runs in Docker on the new host, set `captureDir` back to
 Set environment variables for the upload script (shell profile, systemd unit, or wrapper):
 
 ```bash
-export VTT_API_URL=http://127.0.0.1:8080   # host running sdr-trunk-vtt
+export VTT_API_URL=http://127.0.0.1:8080   # host running trunk-recorder-vtt
 export VTT_API_KEY=your-secret-key
 ```
 
@@ -227,7 +225,7 @@ Requires `ffmpeg` in the API container (installed by the Dockerfile).
 
 ## Prune Trunk Recorder temp / capture dirs
 
-`upload.sh` copies each call into sdr-trunk-vtt, but Trunk Recorder still keeps originals under `tempDir` / `captureDir` (for example `/tmp/tr/t` and `/tmp/tr/r`). Prune aged files so those directories do not grow without bound:
+`upload.sh` copies each call into -vtt, but Trunk Recorder still keeps originals under `tempDir` / `captureDir` (for example `/tmp/tr/t` and `/tmp/tr/r`). Prune aged files so those directories do not grow without bound:
 
 ```bash
 chmod +x scripts/prune-tr-temp.sh
@@ -238,7 +236,7 @@ TR_MAX_AGE_HOURS=24 ./scripts/prune-tr-temp.sh
 Cron example (hourly, keep 24 hours):
 
 ```bash
-0 * * * * cd /path/to/sdr-trunk-vtt && TR_MAX_AGE_HOURS=24 ./scripts/prune-tr-temp.sh >>/tmp/tr-prune.log 2>&1
+0 * * * * cd /path/to/trunk-recorder-vtt && TR_MAX_AGE_HOURS=24 ./scripts/prune-tr-temp.sh >>/tmp/tr-prune.log 2>&1
 ```
 
 Paths are read from `config.json` (`tempDir`, `captureDir`). Override with `TR_CONFIG=/path/to/config.json`.
