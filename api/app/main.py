@@ -1750,7 +1750,7 @@ async def dashboard(request: Request) -> HTMLResponse:
     </tbody>
   </table>
   </div>
-  <p class="meta">Updated <span id="last-updated">just now</span> · API docs: <a href="/docs">/docs</a> · FAQ: <a href="/faq/encrypted">encrypted activity</a> · Health: <a href="/health">/health</a></p>
+  <p class="meta">Updated <span id="last-updated">just now</span> · API docs: <a href="/docs">/docs</a> · FAQ: <a href="/faq/encrypted">encrypted activity</a> · Health: <a href="/health">/health</a> · <a href="https://github.com/superherosteve1/trunk-recorder-vtt" target="_blank" rel="noopener noreferrer">GitHub</a></p>
   <script>
     const POLL_MS = 5000;
     const AUTOPLAY_POLL_MS = 1500;
