@@ -1,16 +1,41 @@
 import csv
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from app.alerts import transcript_has_alert
 from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+# Columns for dashboard list views — omit bulky unused fields; truncate transcripts.
+_CALL_LIST_SELECT = """
+    id, created_at, updated_at, status, system_name, talkgroup, talkgroup_tag,
+    src, src_tag, freq, call_length, wav_path, metadata_json,
+    CASE
+      WHEN transcript IS NULL THEN NULL
+      WHEN length(transcript) > 240 THEN substr(transcript, 1, 240)
+      ELSE transcript
+    END AS transcript,
+    backend_used, error_message, retry_count,
+    COALESCE(has_alert, 0) AS has_alert
+"""
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> bool:
+    cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column in cols:
+        return False
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    return True
 
 
 def init_db() -> None:
@@ -38,9 +63,13 @@ def init_db() -> None:
                 transcript TEXT,
                 backend_used TEXT,
                 error_message TEXT,
-                retry_count INTEGER NOT NULL DEFAULT 0
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                has_alert INTEGER NOT NULL DEFAULT 0
             )
             """
+        )
+        added_alert = _ensure_column(
+            conn, "calls", "has_alert", "INTEGER NOT NULL DEFAULT 0"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_calls_status ON calls(status)"
@@ -51,12 +80,39 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_calls_talkgroup ON calls(talkgroup)"
         )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_calls_talkgroup_created "
+            "ON calls(talkgroup, created_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_calls_has_alert_created "
+            "ON calls(has_alert, created_at DESC)"
+        )
+        if added_alert:
+            _backfill_has_alert(conn)
+
+
+def _backfill_has_alert(conn: sqlite3.Connection) -> None:
+    """One-time scan after adding has_alert — keeps alerts_only index-backed."""
+    rows = conn.execute(
+        """
+        SELECT id, transcript FROM calls
+        WHERE transcript IS NOT NULL AND trim(transcript) != ''
+        """
+    ).fetchall()
+    updated = 0
+    for row in rows:
+        if transcript_has_alert(row["transcript"]):
+            conn.execute("UPDATE calls SET has_alert = 1 WHERE id = ?", (row["id"],))
+            updated += 1
+    logger.info("Backfilled has_alert on %s / %s transcribed calls", updated, len(rows))
 
 
 @contextmanager
 def get_db():
-    conn = sqlite3.connect(settings.db_path)
+    conn = sqlite3.connect(settings.db_path, timeout=30.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 30000")
     try:
         yield conn
         conn.commit()
@@ -282,7 +338,7 @@ def list_calls(
     transcript_query: str | None = None,
     alerts_only: bool = False,
 ) -> list[dict[str, Any]]:
-    query = "SELECT * FROM calls"
+    query = f"SELECT {_CALL_LIST_SELECT} FROM calls"
     params: list[Any] = []
     clauses: list[str] = []
     if status:
@@ -314,67 +370,7 @@ def list_calls(
             clauses.append("transcript LIKE ? ESCAPE '\\'")
             params.append(f"%{escaped}%")
     if alerts_only:
-        # Broad SQLite LIKE terms aligned with dashboard keyword alerts.
-        # Client still applies exact emoji rules after fetch.
-        alert_terms = (
-            "fire",
-            "smoke",
-            "flames",
-            "mental health",
-            "psychiatric",
-            "psych",
-            "5150",
-            "suicidal",
-            "suicide",
-            "behavioral",
-            "crisis",
-            "stabbing",
-            "stabbed",
-            "stab wound",
-            "knife wound",
-            "gunshot",
-            "gun shot",
-            "shots fired",
-            "shooting",
-            "shooter",
-            "gsw",
-            "overdose",
-            "overdosing",
-            "overdosed",
-            "narcan",
-            "naloxone",
-            "fentanyl",
-            "heroin",
-            "doa",
-            "dead on arrival",
-            "deceased",
-            "fatality",
-            "fatal",
-            "code black",
-            "obvious death",
-            "confirmed death",
-            "time of death",
-            "passed away",
-            "pronounced dead",
-            "body found",
-            "found deceased",
-            "trauma",
-            "injur",
-            "patient down",
-            "unconscious",
-            "cardiac arrest",
-            "chest pain",
-            "mvc",
-            "mva",
-            "motor vehicle",
-        )
-        like_parts = []
-        for term in alert_terms:
-            like_parts.append("transcript LIKE ? COLLATE NOCASE")
-            params.append(f"%{term}%")
-        clauses.append("(" + " OR ".join(like_parts) + ")")
-        clauses.append("transcript IS NOT NULL")
-        clauses.append("trim(transcript) != ''")
+        clauses.append("has_alert = 1")
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
     query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
@@ -914,6 +910,7 @@ def mark_call_completed(
     wav_path: Path | str | None = None,
 ) -> None:
     now = _utc_now()
+    has_alert = 1 if transcript_has_alert(transcript) else 0
     with get_db() as conn:
         if wav_path is not None:
             conn.execute(
@@ -924,10 +921,11 @@ def mark_call_completed(
                     transcript = ?,
                     backend_used = ?,
                     error_message = NULL,
-                    wav_path = ?
+                    wav_path = ?,
+                    has_alert = ?
                 WHERE id = ?
                 """,
-                (now, transcript, backend_used, str(wav_path), call_id),
+                (now, transcript, backend_used, str(wav_path), has_alert, call_id),
             )
         else:
             conn.execute(
@@ -937,10 +935,11 @@ def mark_call_completed(
                     updated_at = ?,
                     transcript = ?,
                     backend_used = ?,
-                    error_message = NULL
+                    error_message = NULL,
+                    has_alert = ?
                 WHERE id = ?
                 """,
-                (now, transcript, backend_used, call_id),
+                (now, transcript, backend_used, has_alert, call_id),
             )
 
 

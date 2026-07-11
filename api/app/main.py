@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
+from app.alerts import transcript_alert_emojis
 from app.audio_storage import audio_media_type
 from app.config import settings
 from app.database import (
@@ -680,73 +681,6 @@ async def get_call_audio(call_id: int) -> FileResponse:
     )
 
 
-TRANSCRIPT_ALERT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (
-        re.compile(
-            r"\b("
-            r"working fire|structure fire|building fire|house fire|garage fire|"
-            r"vehicle fire|car fire|brush fire|wildfire|grass fire|"
-            r"smoke showing|flames|fully engulfed|reported fire|confirmed fire|"
-            r"active fire|fire at|on fire|smoke"
-            r")\b",
-            re.I,
-        ),
-        "🔥",
-    ),
-    (
-        re.compile(
-            r"\b(mental health|psychiatric|psych|5150|suicidal|suicide|behavioral|crisis)\b",
-            re.I,
-        ),
-        "🧠",
-    ),
-    (re.compile(r"\b(stabbing|stabbed|stab wound|knife wound)\b", re.I), "🔪"),
-    (
-        re.compile(r"\b(gunshot|gun shot|shots fired|shooting|shooter|gsw)\b", re.I),
-        "💥",
-    ),
-    (
-        re.compile(
-            r"\b("
-            r"overdose|overdosing|overdosed|"
-            r"od(?:ing|ed)?|"
-            r"narcan|naloxone|"
-            r"fentanyl(?:\s+overdose)?|"
-            r"heroin(?:\s+overdose)?"
-            r")\b",
-            re.I,
-        ),
-        "💉",
-    ),
-    (
-        re.compile(
-            r"\b("
-            r"doa|dead on arrival|"
-            r"deceased|fatality|"
-            r"(?<!non-)fatal(?:ity)?|"
-            r"code black|"
-            r"obvious death|confirmed death|time of death|"
-            r"passed away|pronounced dead|"
-            r"body found|found deceased"
-            r")\b",
-            re.I,
-        ),
-        "☠️",
-    ),
-    (
-        re.compile(
-            r"\b("
-            r"trauma(?:tic)?(?:\s+injur(?:y|ies))?|"
-            r"injur(?:y|ies|ed)|"
-            r"patient down|unconscious|cardiac arrest|chest pain|"
-            r"mvc|mva|motor vehicle accident|motor vehicle crash"
-            r")\b",
-            re.I,
-        ),
-        "🩹",
-    ),
-)
-
 CATEGORY_EMOJI_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"police|sheriff|law|campus police", re.I), "🚓"),
     (re.compile(r"fire|ems|medic|health", re.I), "🚒"),
@@ -826,17 +760,7 @@ def _enrich_calls_with_category(calls: list[dict[str, Any]]) -> list[dict[str, A
 
 
 def _transcript_alert_emojis(transcript: str) -> str:
-    if not transcript:
-        return ""
-    seen: set[str] = set()
-    emojis: list[str] = []
-    for pattern, emoji in TRANSCRIPT_ALERT_PATTERNS:
-        if emoji in seen:
-            continue
-        if pattern.search(transcript):
-            seen.add(emoji)
-            emojis.append(emoji)
-    return "".join(emojis)
+    return transcript_alert_emojis(transcript)
 
 
 def _format_transcript_cell(transcript: str, status: str) -> str:
@@ -1569,7 +1493,7 @@ async def dashboard(request: Request) -> HTMLResponse:
   <script>
     const POLL_MS = 5000;
     const QUEUE_POLL_MS = 1000;
-    const CALLS_LIMIT = 500;
+    const CALLS_LIMIT = 150;
     const recordsRequest = {json.dumps(branding["records_request"])};
     const siteBranding = {json.dumps({
         "title": branding["title"],
@@ -1592,6 +1516,8 @@ async def dashboard(request: Request) -> HTMLResponse:
     let hideEncrypted = false;
     let hideUnknownTg = false;
     let alertsOnly = false;
+    let dashboardAbort = null;
+    let callsAbort = null;
     let initialLoadDone = false;
     let knownCallIds = new Set();
     let knownTgActivityAt = new Map();
@@ -2588,7 +2514,11 @@ async def dashboard(request: Request) -> HTMLResponse:
       return callsData.filter((call) => {{
         if (hideEncrypted && call.status === "encrypted") return false;
         if (hideUnknownTg && call.status === "unknown_talkgroup") return false;
-        if (alertsOnly && !transcriptAlertEmojis(call.transcript || "")) return false;
+        if (alertsOnly) {{
+          // Prefer indexed has_alert from API; fall back to client keyword scan.
+          if (call.has_alert != null) return Number(call.has_alert) === 1;
+          return Boolean(transcriptAlertEmojis(call.transcript || ""));
+        }}
         return true;
       }});
     }}
@@ -2860,7 +2790,7 @@ async def dashboard(request: Request) -> HTMLResponse:
       syncFilterUrl();
       renderSystemFilters();
       updateFilterUi();
-      if (refresh) refreshDashboard({{ force: true }});
+      if (refresh) refreshCallsAndActivity();
       unlockAudioPlayback();
     }}
 
@@ -2876,7 +2806,7 @@ async def dashboard(request: Request) -> HTMLResponse:
       syncFilterUrl();
       updateFilterUi({{ scrollActiveQuickFilter: true }});
       if (districtStatsCache) renderDistrictMap(districtStatsCache);
-      if (refresh) refreshDashboard({{ force: true }});
+      if (refresh) refreshCallsAndActivity();
       unlockAudioPlayback();
     }}
 
@@ -2919,23 +2849,51 @@ async def dashboard(request: Request) -> HTMLResponse:
       }}
     }}
 
+    async function refreshCallsAndActivity() {{
+      if (callsAbort) callsAbort.abort();
+      callsAbort = new AbortController();
+      const signal = callsAbort.signal;
+      try {{
+        const callsRes = await fetch(callsEndpoint(), {{ signal }});
+        if (!callsRes.ok) return;
+        const {{ calls }} = await callsRes.json();
+        if (signal.aborted) return;
+        const audioState = captureAudioState();
+        callsData = calls;
+        renderTableBody();
+        restoreAudioState(audioState);
+        if (!rangeSearchActive) enqueueNewCalls(calls);
+        await loadActivityChart();
+      }} catch (err) {{
+        if (err && err.name === "AbortError") return;
+        console.error("Calls refresh failed", err);
+      }}
+    }}
+
     async function refreshDashboard({{ force = false }} = {{}}) {{
       if (rangeSearchActive && !force) return;
+      if (dashboardAbort) dashboardAbort.abort();
+      dashboardAbort = new AbortController();
+      const signal = dashboardAbort.signal;
       try {{
         const [callsRes, healthRes] = await Promise.all([
-          fetch(callsEndpoint()),
-          fetch("/health"),
+          fetch(callsEndpoint(), {{ signal }}),
+          fetch("/health", {{ signal }}),
         ]);
         if (!callsRes.ok || !healthRes.ok) return;
         const {{ calls }} = await callsRes.json();
         const health = await healthRes.json();
+        if (signal.aborted) return;
+        const audioState = captureAudioState();
         callsData = calls;
         renderTableBody();
+        restoreAudioState(audioState);
         if (!rangeSearchActive) enqueueNewCalls(calls);
         updateStats(health.queue);
         updateBackendLabel(health);
         await loadSystems();
         await loadTalkgroups();
+        if (signal.aborted) return;
         await Promise.all([
           loadActivityChart(),
           loadEncryptedAnomalies(),
@@ -2944,6 +2902,7 @@ async def dashboard(request: Request) -> HTMLResponse:
         ]);
         document.getElementById("last-updated").textContent = new Date().toLocaleTimeString();
       }} catch (err) {{
+        if (err && err.name === "AbortError") return;
         console.error("Dashboard refresh failed", err);
       }}
     }}
@@ -3096,7 +3055,7 @@ async def dashboard(request: Request) -> HTMLResponse:
 
     alertsOnlyToggle.addEventListener("change", () => {{
       alertsOnly = alertsOnlyToggle.checked;
-      refreshDashboard({{ force: true }});
+      refreshCallsAndActivity();
     }});
 
     autoPlayToggle.addEventListener("change", () => {{
