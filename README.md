@@ -2,6 +2,8 @@
 
 Dockerized transcription pipeline for [Trunk Recorder](https://github.com/TrunkRecorder/trunk-recorder). Each recorded call (WAV + JSON metadata) is ingested via an `uploadScript`, queued, and transcribed using a Whisper or faster-whisper endpoint on your network.
 
+![trunk-recorder-vtt screenshot](./assets/screenshot.png)
+
 ## Architecture
 
 ```
