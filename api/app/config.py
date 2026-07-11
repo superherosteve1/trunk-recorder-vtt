@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     worker_poll_interval: float = 1.0
     transcription_timeout: float = 300.0
     max_retries: int = 3
+    # When false (cloud archive API), POST /calls requires a transcript;
+    # the in-process Whisper worker is not started.
+    transcription_worker_enabled: bool = True
     trunk_recorder_config: Path = Path("/data/trunk-recorder.json")
     gis_dir: Path = Path("/data/gis")
     docs_dir: Path = Path("/data/docs")
