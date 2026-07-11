@@ -218,6 +218,10 @@ async def get_calls(
         max_length=200,
         description="Case-insensitive substring match against transcript text",
     ),
+    alerts_only: bool = Query(
+        False,
+        description="Return calls whose transcripts match dashboard alert keywords",
+    ),
 ) -> dict[str, Any]:
     calls = list_calls(
         limit=limit,
@@ -228,6 +232,7 @@ async def get_calls(
         created_after=created_after,
         created_before=created_before,
         transcript_query=q,
+        alerts_only=alerts_only,
     )
     return {
         "calls": _enrich_calls_with_category(calls),
@@ -238,6 +243,7 @@ async def get_calls(
         "from": created_after,
         "to": created_before,
         "q": q,
+        "alerts_only": alerts_only,
     }
 
 
@@ -1525,7 +1531,7 @@ async def dashboard(request: Request) -> HTMLResponse:
       <label for="transcript-q">Transcript</label>
       <input id="transcript-q" type="search" placeholder="e.g. shots fired, 10-50…" autocomplete="off" />
     </div>
-    <label class="range-toggle" title="Show only calls whose transcript matched a keyword alert">
+    <label class="range-toggle" title="Show keyword-alert calls across all talk groups (or the selected TG)">
       <input type="checkbox" id="alerts-only" />
       Alerts only
     </label>
@@ -2114,6 +2120,9 @@ async def dashboard(request: Request) -> HTMLResponse:
       if (rangeFrom) params.set("from", rangeFrom);
       if (rangeTo) params.set("to", rangeTo);
       if (transcriptQuery) params.set("q", transcriptQuery);
+      // When alerts-only is on (especially with no TG focused), ask the API for
+      // keyword-matching transcripts so encrypted/metadata rows don't crowd them out.
+      if (alertsOnly) params.set("alerts_only", "true");
       return `/calls?${{params}}`;
     }}
 
@@ -3087,7 +3096,7 @@ async def dashboard(request: Request) -> HTMLResponse:
 
     alertsOnlyToggle.addEventListener("change", () => {{
       alertsOnly = alertsOnlyToggle.checked;
-      renderTableBody();
+      refreshDashboard({{ force: true }});
     }});
 
     autoPlayToggle.addEventListener("change", () => {{

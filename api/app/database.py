@@ -280,6 +280,7 @@ def list_calls(
     created_after: str | None = None,
     created_before: str | None = None,
     transcript_query: str | None = None,
+    alerts_only: bool = False,
 ) -> list[dict[str, Any]]:
     query = "SELECT * FROM calls"
     params: list[Any] = []
@@ -312,6 +313,68 @@ def list_calls(
             )
             clauses.append("transcript LIKE ? ESCAPE '\\'")
             params.append(f"%{escaped}%")
+    if alerts_only:
+        # Broad SQLite LIKE terms aligned with dashboard keyword alerts.
+        # Client still applies exact emoji rules after fetch.
+        alert_terms = (
+            "fire",
+            "smoke",
+            "flames",
+            "mental health",
+            "psychiatric",
+            "psych",
+            "5150",
+            "suicidal",
+            "suicide",
+            "behavioral",
+            "crisis",
+            "stabbing",
+            "stabbed",
+            "stab wound",
+            "knife wound",
+            "gunshot",
+            "gun shot",
+            "shots fired",
+            "shooting",
+            "shooter",
+            "gsw",
+            "overdose",
+            "overdosing",
+            "overdosed",
+            "narcan",
+            "naloxone",
+            "fentanyl",
+            "heroin",
+            "doa",
+            "dead on arrival",
+            "deceased",
+            "fatality",
+            "fatal",
+            "code black",
+            "obvious death",
+            "confirmed death",
+            "time of death",
+            "passed away",
+            "pronounced dead",
+            "body found",
+            "found deceased",
+            "trauma",
+            "injur",
+            "patient down",
+            "unconscious",
+            "cardiac arrest",
+            "chest pain",
+            "mvc",
+            "mva",
+            "motor vehicle",
+        )
+        like_parts = []
+        for term in alert_terms:
+            like_parts.append("transcript LIKE ? COLLATE NOCASE")
+            params.append(f"%{term}%")
+        clauses.append("(" + " OR ".join(like_parts) + ")")
+        clauses.append("transcript IS NOT NULL")
+        clauses.append("trim(transcript) != ''")
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
     query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
