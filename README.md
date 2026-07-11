@@ -403,6 +403,6 @@ GPL-3.0 (compatible with Trunk Recorder)
 
 ## Remote Kubernetes
 
-Manifests that mirror this cluster’s `open-webui` pattern (NFS PV + LoadBalancer)
-live under [deploy/k8s/](deploy/k8s/README.md). Trunk Recorder stays on the Mac;
+Manifests pattern (NFS PV + LoadBalancer)
+live under [deploy/k8s/](deploy/k8s/README.md). Trunk Recorder stays on system hosting the SDR;
 only the VTT API/dashboard runs remotely.
