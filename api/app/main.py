@@ -929,7 +929,7 @@ def _audio_player(call: dict[str, Any]) -> str:
 
 def _render_call_rows(calls: list[dict[str, Any]]) -> str:
     if not calls:
-        return '<tr><td colspan="13"><em>No calls yet</em></td></tr>'
+        return '<tr><td class="calls-empty" colspan="13"><em>No calls yet</em></td></tr>'
 
     rows = []
     for call in _enrich_calls_with_category(calls):
@@ -943,20 +943,20 @@ def _render_call_rows(calls: list[dict[str, Any]]) -> str:
         )
         rows.append(
             f"""
-            <tr>
-              <td>{call['id']}</td>
-              <td>{html.escape(str(call.get('created_at') or ''))}</td>
-              <td>{html.escape(str(call.get('system_name') or ''))}</td>
-              <td>{html.escape(str(call.get('talkgroup') or ''))}</td>
-              <td>{_format_call_type_cell(call)}</td>
-              <td title="Radio / unit ID">{_format_src_cell(call.get('src'))}</td>
-              <td>{html.escape(str(call.get('call_length') or ''))}</td>
-              <td><span class="status {html.escape(call['status'])}">{html.escape(call['status'])}</span></td>
-              <td>{_audio_player(call)}</td>
-              <td class="tag">{tag_html}</td>
-              <td class="category-cell">{category_html}</td>
-              <td class="alerts">{alerts_html}</td>
-              <td class="transcript">{preview_html}</td>
+            <tr data-call-id="{call['id']}">
+              <td class="col-id" data-label="ID">{call['id']}</td>
+              <td class="col-created" data-label="Created">{html.escape(str(call.get('created_at') or ''))}</td>
+              <td class="col-system" data-label="System">{html.escape(str(call.get('system_name') or ''))}</td>
+              <td class="col-tg" data-label="TG">{html.escape(str(call.get('talkgroup') or ''))}</td>
+              <td class="col-type" data-label="Type">{_format_call_type_cell(call)}</td>
+              <td class="col-src" data-label="Src" title="Radio / unit ID">{_format_src_cell(call.get('src'))}</td>
+              <td class="col-length" data-label="Length">{html.escape(str(call.get('call_length') or ''))}</td>
+              <td class="col-status" data-label="Status"><span class="status {html.escape(call['status'])}">{html.escape(call['status'])}</span></td>
+              <td class="col-audio" data-label="Audio">{_audio_player(call)}</td>
+              <td class="tag col-tag" data-label="Tag">{tag_html}</td>
+              <td class="category-cell col-category" data-label="Category">{category_html}</td>
+              <td class="alerts col-alerts" data-label="Alerts">{alerts_html}</td>
+              <td class="transcript col-transcript" data-label="Transcript">{preview_html}</td>
             </tr>
             """
         )
@@ -1262,11 +1262,11 @@ async def dashboard(request: Request) -> HTMLResponse:
     .anomaly-item .conf.high {{ color: #f87171; }}
     .anomaly-item .conf.medium {{ color: #fbbf24; }}
     .anomaly-item .conf.low {{ color: #64748b; }}
-    .activity-panel {{ flex: 2 1 22rem; min-width: 18rem; background: #1e293b; padding: 0.75rem 1rem; border-radius: 0.5rem; }}
+    .activity-panel {{ flex: 2 1 22rem; min-width: min(100%, 18rem); background: #1e293b; padding: 0.75rem 1rem; border-radius: 0.5rem; }}
     .activity-panel strong {{ display: block; margin-bottom: 0.5rem; font-size: 0.85rem; color: #e2e8f0; }}
     .activity-chart svg {{ width: 100%; height: auto; min-height: 160px; display: block; }}
     .activity-empty {{ color: #64748b; font-size: 0.85rem; padding: 1rem 0; }}
-    .outcome-panel {{ flex: 1.4 1 16rem; min-width: 14rem; background: #1e293b; padding: 0.75rem 1rem; border-radius: 0.5rem; }}
+    .outcome-panel {{ flex: 1.4 1 16rem; min-width: min(100%, 14rem); background: #1e293b; padding: 0.75rem 1rem; border-radius: 0.5rem; }}
     .outcome-panel strong {{ display: block; margin-bottom: 0.5rem; font-size: 0.85rem; color: #e2e8f0; }}
     .outcome-chart svg {{ width: 100%; height: auto; display: block; }}
     .outcome-legend {{
@@ -1289,7 +1289,7 @@ async def dashboard(request: Request) -> HTMLResponse:
     .outcome-swatch.failed {{ background: #f87171; }}
     .district-panel {{
       flex: 2 1 22rem;
-      min-width: 18rem;
+      min-width: min(100%, 18rem);
       background: #1e293b;
       padding: 0.75rem 1rem;
       border-radius: 0.5rem;
@@ -1362,6 +1362,139 @@ async def dashboard(request: Request) -> HTMLResponse:
     .transcript {{ max-width: 40rem; }}
     .audio-player {{ width: 14rem; max-width: 100%; height: 2rem; }}
     a {{ color: #60a5fa; }}
+    .table-scroll {{
+      width: 100%;
+      border-radius: 0.5rem;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }}
+    .table-scroll table {{ margin: 0; }}
+    .calls-empty {{ color: #94a3b8; }}
+
+    @media (max-width: 900px) {{
+      body {{ margin: 1rem; }}
+      .page-header {{ gap: 1rem; margin-bottom: 1rem; }}
+      .notice {{ max-width: none; flex: 1 1 100%; }}
+      .toolbar {{ gap: 0.75rem; }}
+      .filter-block {{ flex: 1 1 100%; max-width: none; }}
+      .range-search {{
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.65rem;
+      }}
+      .range-search .filter-block {{ width: 100%; }}
+      .range-search input[type="datetime-local"],
+      .range-search input[type="search"] {{
+        width: 100%;
+        min-width: 0;
+        box-sizing: border-box;
+      }}
+      .range-actions {{
+        width: 100%;
+        flex-wrap: wrap;
+        padding-bottom: 0;
+      }}
+      .range-actions button {{ flex: 1 1 auto; min-height: 2.5rem; }}
+      .view-toggles {{ width: 100%; gap: 0.65rem 0.9rem; }}
+      .activity-panel,
+      .outcome-panel,
+      .district-panel {{
+        flex: 1 1 100%;
+        min-width: 0;
+      }}
+      .anomaly-badge {{ max-width: none; flex: 1 1 100%; }}
+      /* Hide secondary table columns on tablet; keep scroll for the rest */
+      .col-type,
+      .col-src,
+      .col-length,
+      .col-category {{ display: none; }}
+    }}
+
+    @media (max-width: 640px) {{
+      body {{ margin: 0.75rem; }}
+      h1 {{ font-size: 1.35rem; }}
+      .stat {{
+        min-width: calc(50% - 0.5rem);
+        flex: 1 1 calc(50% - 0.5rem);
+        padding: 0.7rem 0.85rem;
+      }}
+      .stat [data-status] {{ font-size: 1.55rem; }}
+      .quick-filter,
+      .system-filter {{
+        padding: 0.5rem 0.9rem;
+        font-size: 0.88rem;
+        min-height: 2.4rem;
+      }}
+      .range-toggle,
+      .auto-play-toggle {{
+        font-size: 0.95rem;
+        padding: 0.35rem 0;
+        min-height: 2.4rem;
+      }}
+      .audio-player {{ width: 100%; height: 2.4rem; }}
+      .tag {{ max-width: none; white-space: normal; }}
+      .transcript {{ max-width: none; }}
+
+      /* Card layout for calls */
+      .table-scroll {{ overflow: visible; }}
+      .table-scroll table,
+      .table-scroll thead,
+      .table-scroll tbody,
+      .table-scroll th,
+      .table-scroll td,
+      .table-scroll tr {{
+        display: block;
+        width: 100%;
+      }}
+      .table-scroll thead {{ display: none; }}
+      .table-scroll tbody tr {{
+        background: #1e293b;
+        border: 1px solid #334155;
+        border-radius: 0.65rem;
+        margin-bottom: 0.75rem;
+        padding: 0.65rem 0.75rem 0.35rem;
+        box-sizing: border-box;
+      }}
+      .table-scroll tbody tr.playing {{
+        border-color: #2563eb;
+        background: #1e3a5f !important;
+      }}
+      .table-scroll td {{
+        display: grid;
+        grid-template-columns: 6.5rem 1fr;
+        gap: 0.35rem 0.75rem;
+        align-items: start;
+        border-bottom: 0;
+        padding: 0.35rem 0;
+        text-align: left;
+      }}
+      .table-scroll td::before {{
+        content: attr(data-label);
+        color: #94a3b8;
+        font-size: 0.72rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        padding-top: 0.15rem;
+      }}
+      .table-scroll td.col-alerts {{
+        align-items: center;
+      }}
+      .table-scroll td.col-alerts .alerts {{
+        text-align: left;
+        width: auto;
+      }}
+      .table-scroll td.calls-empty {{
+        display: block;
+        color: #94a3b8;
+      }}
+      .table-scroll td.calls-empty::before {{ display: none; }}
+      /* Restore secondary columns as labeled card rows on phone */
+      .col-type,
+      .col-src,
+      .col-length,
+      .col-category {{ display: grid; }}
+    }}
   </style>
 </head>
 <body>
@@ -1467,28 +1600,30 @@ async def dashboard(request: Request) -> HTMLResponse:
     <div class="range-active-note" id="range-active-note" hidden></div>
   </div>
   <div class="quick-filters" id="quick-filters"></div>
+  <div class="table-scroll">
   <table>
     <thead>
       <tr>
-        <th class="sortable" data-sort="id">ID<span class="sort-indicator"></span></th>
-        <th class="sortable sorted" data-sort="created_at">Created<span class="sort-indicator"></span></th>
-        <th class="sortable" data-sort="system_name">System<span class="sort-indicator"></span></th>
-        <th class="sortable" data-sort="talkgroup">TG<span class="sort-indicator"></span></th>
-        <th class="sortable" data-sort="call_type">Type<span class="sort-indicator"></span></th>
-        <th class="sortable" data-sort="src">Src<span class="sort-indicator"></span></th>
-        <th class="sortable" data-sort="call_length">Length<span class="sort-indicator"></span></th>
-        <th class="sortable" data-sort="status">Status<span class="sort-indicator"></span></th>
-        <th>Audio</th>
-        <th class="sortable" data-sort="talkgroup_tag">Tag<span class="sort-indicator"></span></th>
-        <th class="sortable" data-sort="category">Category<span class="sort-indicator"></span></th>
-        <th class="alerts-col">Alerts</th>
-        <th class="sortable" data-sort="transcript">Transcript<span class="sort-indicator"></span></th>
+        <th class="sortable col-id" data-sort="id">ID<span class="sort-indicator"></span></th>
+        <th class="sortable sorted col-created" data-sort="created_at">Created<span class="sort-indicator"></span></th>
+        <th class="sortable col-system" data-sort="system_name">System<span class="sort-indicator"></span></th>
+        <th class="sortable col-tg" data-sort="talkgroup">TG<span class="sort-indicator"></span></th>
+        <th class="sortable col-type" data-sort="call_type">Type<span class="sort-indicator"></span></th>
+        <th class="sortable col-src" data-sort="src">Src<span class="sort-indicator"></span></th>
+        <th class="sortable col-length" data-sort="call_length">Length<span class="sort-indicator"></span></th>
+        <th class="sortable col-status" data-sort="status">Status<span class="sort-indicator"></span></th>
+        <th class="col-audio">Audio</th>
+        <th class="sortable col-tag" data-sort="talkgroup_tag">Tag<span class="sort-indicator"></span></th>
+        <th class="sortable col-category" data-sort="category">Category<span class="sort-indicator"></span></th>
+        <th class="alerts-col col-alerts">Alerts</th>
+        <th class="sortable col-transcript" data-sort="transcript">Transcript<span class="sort-indicator"></span></th>
       </tr>
     </thead>
     <tbody id="calls-body">
       {_render_call_rows(calls)}
     </tbody>
   </table>
+  </div>
   <p class="meta">Updated <span id="last-updated">just now</span> · API docs: <a href="/docs">/docs</a> · FAQ: <a href="/faq/encrypted">encrypted activity</a> · Health: <a href="/health">/health</a></p>
   <script>
     const POLL_MS = 5000;
@@ -2536,7 +2671,7 @@ async def dashboard(request: Request) -> HTMLResponse:
         if (callsData.length && (hideEncrypted || hideUnknownTg || alertsOnly)) {{
           message = "No calls match the current filters";
         }}
-        return `<tr><td colspan="13"><em>${{message}}</em></td></tr>`;
+        return `<tr><td class="calls-empty" colspan="13"><em>${{message}}</em></td></tr>`;
       }}
       return calls.map((call) => {{
         const transcript = call.transcript || "";
@@ -2557,19 +2692,19 @@ async def dashboard(request: Request) -> HTMLResponse:
         }}
         const playingClass = Number(call.id) === currentAutoPlayId ? " playing" : "";
         return `<tr data-call-id="${{call.id}}" class="${{playingClass}}">
-          <td>${{call.id}}</td>
-          <td>${{esc(call.created_at || "")}}</td>
-          <td>${{esc(call.system_name || "")}}</td>
-          <td>${{esc(String(call.talkgroup ?? ""))}}</td>
-          <td>${{typeHtml}}</td>
-          <td title="Radio / unit ID">${{esc(srcValue)}}</td>
-          <td>${{esc(String(call.call_length ?? ""))}}</td>
-          <td><span class="status ${{esc(call.status)}}">${{esc(call.status)}}</span></td>
-          <td>${{renderAudioCell(call)}}</td>
-          <td class="tag">${{tagHtml}}</td>
-          <td class="category-cell">${{categoryHtml}}</td>
-          <td class="alerts">${{alertsHtml}}</td>
-          <td class="transcript">${{previewHtml}}</td>
+          <td class="col-id" data-label="ID">${{call.id}}</td>
+          <td class="col-created" data-label="Created">${{esc(call.created_at || "")}}</td>
+          <td class="col-system" data-label="System">${{esc(call.system_name || "")}}</td>
+          <td class="col-tg" data-label="TG">${{esc(String(call.talkgroup ?? ""))}}</td>
+          <td class="col-type" data-label="Type">${{typeHtml}}</td>
+          <td class="col-src" data-label="Src" title="Radio / unit ID">${{esc(srcValue)}}</td>
+          <td class="col-length" data-label="Length">${{esc(String(call.call_length ?? ""))}}</td>
+          <td class="col-status" data-label="Status"><span class="status ${{esc(call.status)}}">${{esc(call.status)}}</span></td>
+          <td class="col-audio" data-label="Audio">${{renderAudioCell(call)}}</td>
+          <td class="tag col-tag" data-label="Tag">${{tagHtml}}</td>
+          <td class="category-cell col-category" data-label="Category">${{categoryHtml}}</td>
+          <td class="alerts col-alerts" data-label="Alerts">${{alertsHtml}}</td>
+          <td class="transcript col-transcript" data-label="Transcript">${{previewHtml}}</td>
         </tr>`;
       }}).join("");
     }}
