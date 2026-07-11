@@ -59,32 +59,56 @@ class TranscriptionWorker:
             logger.info("Processing call %s (%s)", call_id, wav_path.name)
 
             if not wav_path.exists():
-                mark_call_failed(
-                    call_id,
-                    error_message=f"Audio file not found: {wav_path}",
-                    increment_retry=False,
-                )
-                continue
+                # DB path may lag behind early WAV→MP3 compression.
+                resolved = None
+                for ext in (".mp3", ".ogg", ".opus", ".wav"):
+                    alt = wav_path.with_suffix(ext)
+                    if alt.is_file():
+                        resolved = alt
+                        break
+                if resolved is None:
+                    mark_call_failed(
+                        call_id,
+                        error_message=f"Audio file not found: {wav_path}",
+                        increment_retry=False,
+                    )
+                    logger.error(
+                        "Giving up on call %s; audio missing at %s",
+                        call_id,
+                        wav_path,
+                    )
+                    continue
+                wav_path = resolved
+                update_call_audio_path(call_id, wav_path=wav_path)
 
             try:
-                transcript, backend_used = await transcribe_audio(wav_path)
-                stored_path = wav_path
-                if settings.audio_compress:
+                # Compress before Whisper so the dashboard can play a small MP3
+                # while transcription is still running (WAV on NFS is slow to start).
+                play_path = wav_path
+                if settings.audio_compress and wav_path.suffix.lower() == ".wav":
                     compressed = await asyncio.to_thread(compress_call_audio, wav_path)
                     if compressed is not None:
-                        stored_path = compressed
+                        play_path = compressed
+                        update_call_audio_path(call_id, wav_path=play_path)
+                        logger.info(
+                            "Compressed call %s for playback before transcription (%s)",
+                            call_id,
+                            play_path.name,
+                        )
+
+                transcript, backend_used = await transcribe_audio(play_path)
                 mark_call_completed(
                     call_id,
                     transcript=transcript,
                     backend_used=backend_used,
-                    wav_path=stored_path,
+                    wav_path=play_path,
                 )
                 logger.info(
                     "Completed call %s via %s (%d chars, audio=%s)",
                     call_id,
                     backend_used,
                     len(transcript),
-                    stored_path.name,
+                    play_path.name,
                 )
             except TranscriptionError as exc:
                 mark_call_failed(

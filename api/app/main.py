@@ -1,6 +1,7 @@
 import html
 import json
 import logging
+import asyncio
 import re
 import shutil
 import uuid
@@ -8,7 +9,18 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
@@ -34,6 +46,7 @@ from app.database import (
     list_talkgroup_stats,
     load_talkgroups_catalog,
     mark_call_completed,
+    update_call_audio_path,
 )
 from app.districts import geojson_path, get_district_activity, list_agencies
 from app.worker import worker
@@ -46,6 +59,23 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def _compress_pending_call_audio(call_id: int, audio_path: Path) -> None:
+    """Background: WAV→MP3 right after ingest so playback does not wait on Whisper."""
+    if audio_path.suffix.lower() != ".wav":
+        return
+    try:
+        compressed = compress_call_audio(audio_path)
+        if compressed is not None:
+            update_call_audio_path(call_id, wav_path=compressed)
+            logger.info(
+                "Early-compressed pending call %s -> %s",
+                call_id,
+                compressed.name,
+            )
+    except Exception:
+        logger.exception("Early compression failed for call %s", call_id)
 
 security = HTTPBearer(auto_error=False)
 
@@ -105,7 +135,8 @@ app = FastAPI(
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    counts = count_calls_by_status()
+    # SQLite on NFS can block; keep the event loop free for probes/uploads.
+    counts = await asyncio.to_thread(count_calls_by_status)
     return {
         "status": "ok",
         "transcription_backend": settings.transcription_backend.value,
@@ -117,6 +148,7 @@ async def health() -> dict[str, Any]:
 
 @app.post("/calls", dependencies=[Depends(verify_api_key)])
 async def ingest_call(
+    background_tasks: BackgroundTasks,
     call_audio: UploadFile = File(...),
     call_json: UploadFile | None = File(None),
     call_metadata: str | None = Form(None),
@@ -201,6 +233,9 @@ async def ingest_call(
             "wav_path": str(stored_path),
             "backend_used": used_backend,
         }
+
+    if settings.audio_compress and audio_path.suffix.lower() == ".wav":
+        background_tasks.add_task(_compress_pending_call_audio, call_id, audio_path)
 
     logger.info(
         "Queued call %s system=%s talkgroup=%s length=%.1fs",
@@ -740,7 +775,16 @@ async def get_call_audio(call_id: int) -> FileResponse:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audio file not found")
 
     if not wav_path.is_file():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audio file not found")
+        # Worker may have compressed WAV→MP3 while DB still briefly pointed at WAV.
+        for ext in (".mp3", ".ogg", ".opus", ".wav"):
+            alt = wav_path.with_suffix(ext)
+            if alt != wav_path and alt.is_file():
+                wav_path = alt
+                break
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Audio file not found"
+            )
 
     return FileResponse(
         wav_path,
@@ -749,6 +793,7 @@ async def get_call_audio(call_id: int) -> FileResponse:
         headers={
             # Short private cache; ?f=ext on the dashboard URL busts when WAV→MP3.
             "Cache-Control": "private, max-age=120",
+            "Accept-Ranges": "bytes",
         },
     )
 
@@ -1099,6 +1144,7 @@ async def dashboard(request: Request) -> HTMLResponse:
     .combobox-input-wrap input {{ flex: 1; background: transparent; border: 0; color: #e2e8f0; font: inherit; outline: none; min-width: 0; }}
     .combobox-input-wrap input::placeholder {{ color: #64748b; }}
     .filter-chip {{ display: inline-flex; align-items: center; gap: 0.35rem; background: #0f766e; color: #ccfbf1; border-radius: 999px; padding: 0.15rem 0.55rem; font-size: 0.8rem; white-space: nowrap; }}
+    .filter-chip[hidden] {{ display: none !important; }}
     .filter-chip button {{ background: transparent; border: 0; color: inherit; cursor: pointer; font-size: 1rem; line-height: 1; padding: 0; }}
     .combobox-menu {{ position: absolute; z-index: 20; top: calc(100% + 0.35rem); left: 0; right: 0; max-height: 16rem; overflow: auto; background: #111827; border: 1px solid #334155; border-radius: 0.65rem; box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35); }}
     .combobox-menu[hidden] {{ display: none; }}
@@ -1707,6 +1753,7 @@ async def dashboard(request: Request) -> HTMLResponse:
   <p class="meta">Updated <span id="last-updated">just now</span> · API docs: <a href="/docs">/docs</a> · FAQ: <a href="/faq/encrypted">encrypted activity</a> · Health: <a href="/health">/health</a></p>
   <script>
     const POLL_MS = 5000;
+    const AUTOPLAY_POLL_MS = 1500;
     const QUEUE_POLL_MS = 1000;
     const CALLS_LIMIT = 150;
     const recordsRequest = {json.dumps(branding["records_request"])};
@@ -2571,6 +2618,68 @@ async def dashboard(request: Request) -> HTMLResponse:
       }}
     }}
 
+    function warmAudioElement(audio) {{
+      if (!audio) return;
+      // Already have media data buffered — don't call load() (that discards it).
+      if (audio.readyState >= 2) {{
+        audio.dataset.warmed = "1";
+        return;
+      }}
+      if (audio.dataset.warmed === "1") return;
+      audio.dataset.warmed = "1";
+      if (audio.preload === "none") audio.preload = "auto";
+      try {{
+        audio.load();
+      }} catch (err) {{
+        console.warn("Audio warm failed:", err);
+      }}
+    }}
+
+    async function prefetchCallAudio(callId) {{
+      const audio = document.querySelector(`audio[data-call-id="${{callId}}"]`);
+      if (!audio || audio.dataset.blobPrefetch === "1") return;
+      if (audio.readyState >= 3) {{
+        audio.dataset.blobPrefetch = "1";
+        return;
+      }}
+      audio.dataset.blobPrefetch = "1";
+      const src = audio.currentSrc || audio.src;
+      if (!src) return;
+      try {{
+        const response = await fetch(src, {{ credentials: "same-origin" }});
+        if (!response.ok) {{
+          audio.dataset.blobPrefetch = "0";
+          return;
+        }}
+        const blob = await response.blob();
+        // Element may have been replaced while fetching.
+        const live = document.querySelector(`audio[data-call-id="${{callId}}"]`);
+        if (!live || live !== audio) return;
+        if (live.dataset.originalSrc) {{
+          try {{ URL.revokeObjectURL(live.src); }} catch (_) {{}}
+        }}
+        live.dataset.originalSrc = src;
+        live.src = URL.createObjectURL(blob);
+        live.preload = "auto";
+        live.dataset.warmed = "1";
+      }} catch (err) {{
+        audio.dataset.blobPrefetch = "0";
+        console.warn("Audio prefetch failed:", err);
+      }}
+    }}
+
+    function prefetchPlayQueue(limit = 2) {{
+      const ids = [];
+      if (currentAutoPlayId != null) {{
+        // Prefetch whatever is next after the current track.
+      }}
+      for (const id of playQueue.slice(0, limit)) ids.push(id);
+      for (const id of ids) {{
+        warmAudioElement(document.querySelector(`audio[data-call-id="${{id}}"]`));
+        prefetchCallAudio(id);
+      }}
+    }}
+
     function unlockAudioPlayback() {{
       if (audioUnlocked) return;
       audioUnlocked = true;
@@ -2629,6 +2738,7 @@ async def dashboard(request: Request) -> HTMLResponse:
         currentAutoPlayId = null;
         highlightPlayingRow(null);
         updateAutoPlayStatus();
+        prefetchPlayQueue(2);
         processPlayQueue();
       }});
     }}
@@ -2648,7 +2758,14 @@ async def dashboard(request: Request) -> HTMLResponse:
       }}
 
       attachAutoPlayEndedHandler(audio);
-      audio.currentTime = 0;
+      warmAudioElement(audio);
+      if (audio.readyState >= 1 && audio.currentTime > 0.05) {{
+        try {{
+          audio.currentTime = 0;
+        }} catch (_) {{
+          /* ignore seek before metadata */
+        }}
+      }}
       const started = await tryPlayAudio(audio);
       if (!started) {{
         isPlayingQueue = false;
@@ -2660,6 +2777,7 @@ async def dashboard(request: Request) -> HTMLResponse:
 
       scrollRowIntoViewIfNeeded(audio.closest("tr"));
       updateAutoPlayStatus();
+      prefetchPlayQueue(2);
       return true;
     }}
 
@@ -2683,12 +2801,24 @@ async def dashboard(request: Request) -> HTMLResponse:
       if (isPlayingQueue) return;
 
       while (playQueue.length) {{
-        const nextId = playQueue[0];
+        const nextId = playQueue.shift();
+        const el = document.querySelector(`audio[data-call-id="${{nextId}}"]`);
+        warmAudioElement(el);
+        if (el && el.readyState < 2) {{
+          await Promise.race([
+            new Promise((resolve) => {{
+              const done = () => {{
+                el.removeEventListener("canplay", done);
+                resolve();
+              }};
+              el.addEventListener("canplay", done);
+            }}),
+            new Promise((resolve) => setTimeout(resolve, 2500)),
+          ]);
+        }}
         if (await playCallById(nextId)) {{
-          playQueue.shift();
           return;
         }}
-        break;
       }}
       updateAutoPlayStatus();
     }}
@@ -2711,6 +2841,7 @@ async def dashboard(request: Request) -> HTMLResponse:
           .filter((call) => !NON_PLAYABLE_STATUSES.has(call.status))
           .map((call) => call.id),
       );
+      prefetchPlayQueue(3);
       processPlayQueue();
     }}
 
@@ -2822,15 +2953,88 @@ async def dashboard(request: Request) -> HTMLResponse:
       }}).join("");
     }}
 
-    function callsFingerprint(calls) {{
+    function rowStructureFingerprint(calls) {{
+      // Rows present / playable — full rebuild only when this changes.
       return calls.map((call) => [
         call.id,
-        call.status,
-        call.updated_at || "",
-        call.has_alert ?? "",
-        (call.transcript || "").length,
-        call.wav_path || "",
+        NON_PLAYABLE_STATUSES.has(call.status) ? "x" : "a",
       ].join(":")).join("|");
+    }}
+
+    function audioPathFingerprint(calls) {{
+      return calls.map((call) => `${{call.id}}:${{call.wav_path || ""}}`).join("|");
+    }}
+
+    function patchCallMetadata(calls) {{
+      for (const call of calls) {{
+        const row = document.querySelector(`tr[data-call-id="${{call.id}}"]`);
+        if (!row) continue;
+        const statusEl = row.querySelector(".col-status");
+        if (statusEl) {{
+          statusEl.innerHTML = `<span class="status ${{esc(call.status)}}">${{esc(call.status)}}</span>`;
+        }}
+        const alertsEl = row.querySelector(".col-alerts");
+        if (alertsEl) {{
+          alertsEl.innerHTML = formatAlertsCell(call.transcript || "");
+        }}
+        const transcriptEl = row.querySelector(".col-transcript");
+        if (transcriptEl) {{
+          transcriptEl.innerHTML = formatTranscriptCell(call.transcript || "", call.status);
+        }}
+      }}
+      updateFilterUi();
+      updateAutoPlayStatus();
+    }}
+
+    function patchAudioSources(calls) {{
+      // Update only the rows whose stored file changed (WAV→MP3). Do not rebuild
+      // the whole table — that wiped buffered/prefetched audio for the next clip.
+      for (const call of calls) {{
+        if (NON_PLAYABLE_STATUSES.has(call.status)) continue;
+        const audio = document.querySelector(`audio[data-call-id="${{call.id}}"]`);
+        if (!audio) continue;
+        const nextSrc = audioSrcForCall(call);
+        let currentF = "";
+        try {{
+          currentF = new URL(audio.dataset.originalSrc || audio.src, window.location.href).searchParams.get("f") || "";
+        }} catch (_) {{
+          currentF = "";
+        }}
+        let nextF = "";
+        try {{
+          nextF = new URL(nextSrc, window.location.href).searchParams.get("f") || "";
+        }} catch (_) {{
+          nextF = "";
+        }}
+        if (currentF === nextF && (audio.dataset.originalSrc || audio.getAttribute("src") || "").includes(`/calls/${{call.id}}/audio`)) {{
+          continue;
+        }}
+        const wasCurrent = Number(call.id) === currentAutoPlayId;
+        const wasPlaying = wasCurrent && !audio.paused;
+        const t = audio.currentTime;
+        if (audio.dataset.originalSrc) {{
+          try {{ URL.revokeObjectURL(audio.src); }} catch (_) {{}}
+        }}
+        delete audio.dataset.originalSrc;
+        delete audio.dataset.warmed;
+        delete audio.dataset.blobPrefetch;
+        delete audio.dataset.autoPlayBound;
+        audio.preload = "auto";
+        audio.src = nextSrc;
+        if (wasPlaying) {{
+          attachAutoPlayEndedHandler(audio);
+          const resume = () => {{
+            try {{ audio.currentTime = t; }} catch (_) {{}}
+            tryPlayAudio(audio);
+          }};
+          if (audio.readyState >= 1) resume();
+          else audio.addEventListener("loadedmetadata", resume, {{ once: true }});
+        }} else if (playQueue.includes(Number(call.id))) {{
+          warmAudioElement(audio);
+          prefetchCallAudio(call.id);
+        }}
+      }}
+      prefetchPlayQueue(2);
     }}
 
     function renderTableBody() {{
@@ -2847,6 +3051,7 @@ async def dashboard(request: Request) -> HTMLResponse:
       pauseAllAudio();
       document.getElementById("calls-body").innerHTML = renderRows(sortCalls(getVisibleCalls()));
       restoreAudioState(audioState);
+      prefetchPlayQueue(3);
 
       if (playingId != null && anchorTop != null) {{
         const playingRow = document.querySelector(`tr[data-call-id="${{playingId}}"]`);
@@ -2862,18 +3067,24 @@ async def dashboard(request: Request) -> HTMLResponse:
       updateAutoPlayStatus();
     }}
 
-    let lastCallsFingerprint = "";
+    let lastRowStructureFingerprint = "";
+    let lastAudioPathFingerprint = "";
 
     function applyCallsData(calls, {{ forceTable = false }} = {{}}) {{
       callsData = calls;
-      const fingerprint = callsFingerprint(calls);
-      if (forceTable || fingerprint !== lastCallsFingerprint) {{
-        lastCallsFingerprint = fingerprint;
+      const structureFp = rowStructureFingerprint(calls);
+      const audioFp = audioPathFingerprint(calls);
+      if (forceTable || structureFp !== lastRowStructureFingerprint) {{
+        lastRowStructureFingerprint = structureFp;
+        lastAudioPathFingerprint = audioFp;
         renderTableBody();
-      }} else {{
-        updateFilterUi();
-        updateAutoPlayStatus();
+        return;
       }}
+      if (audioFp !== lastAudioPathFingerprint) {{
+        lastAudioPathFingerprint = audioFp;
+        patchAudioSources(calls);
+      }}
+      patchCallMetadata(calls);
     }}
 
     function updateStats(counts) {{
@@ -3121,7 +3332,8 @@ async def dashboard(request: Request) -> HTMLResponse:
 
     function selectSystem(system, {{ refresh = true }} = {{}}) {{
       selectedSystem = system ? String(system) : null;
-      lastCallsFingerprint = "";
+      lastRowStructureFingerprint = "";
+      lastAudioPathFingerprint = "";
       resetAutoPlayState();
       syncFilterUrl();
       renderSystemFilters();
@@ -3134,7 +3346,8 @@ async def dashboard(request: Request) -> HTMLResponse:
       selectedCategory = null;
       selectedTalkgroup = talkgroup == null ? null : Number(talkgroup);
       if (selectedTalkgroup == null) selectedDistrictId = null;
-      lastCallsFingerprint = "";
+      lastRowStructureFingerprint = "";
+      lastAudioPathFingerprint = "";
       tgSearch.value = "";
       tgMenu.hidden = true;
       activeMenuIndex = -1;
@@ -3153,7 +3366,8 @@ async def dashboard(request: Request) -> HTMLResponse:
       selectedTalkgroup = null;
       selectedDistrictId = null;
       selectedCategory = next;
-      lastCallsFingerprint = "";
+      lastRowStructureFingerprint = "";
+      lastAudioPathFingerprint = "";
       tgSearch.value = "";
       tgMenu.hidden = true;
       activeMenuIndex = -1;
@@ -3167,11 +3381,22 @@ async def dashboard(request: Request) -> HTMLResponse:
     }}
 
     function clearTalkgroupOrCategory() {{
-      if (selectedCategory) {{
-        selectCategory(null);
-      }} else {{
-        selectTalkgroup(null);
-      }}
+      // Always clear both so the chip cannot stick if state was mixed.
+      selectedCategory = null;
+      selectedTalkgroup = null;
+      selectedDistrictId = null;
+      lastRowStructureFingerprint = "";
+      lastAudioPathFingerprint = "";
+      tgSearch.value = "";
+      tgMenu.hidden = true;
+      activeMenuIndex = -1;
+      clearActivityHighlight(null);
+      resetAutoPlayState();
+      syncFilterUrl();
+      updateFilterUi();
+      if (districtStatsCache) renderDistrictMap(districtStatsCache);
+      refreshCallsAndActivity();
+      unlockAudioPlayback();
     }}
 
     async function loadSystems() {{
@@ -3346,7 +3571,17 @@ async def dashboard(request: Request) -> HTMLResponse:
       activateMenuOption(option);
     }});
 
-    tgClear.addEventListener("click", () => clearTalkgroupOrCategory());
+    tgClear.addEventListener("click", (event) => {{
+      event.preventDefault();
+      event.stopPropagation();
+      clearTalkgroupOrCategory();
+    }});
+
+    document.getElementById("calls-body").addEventListener("pointerenter", (event) => {{
+      const audio = event.target.closest?.("audio[data-call-id]");
+      if (!audio) return;
+      warmAudioElement(audio);
+    }}, true);
 
     systemFilters.addEventListener("click", (event) => {{
       const button = event.target.closest(".system-filter[data-system]");
@@ -3461,6 +3696,15 @@ async def dashboard(request: Request) -> HTMLResponse:
     selectedSystem = readSystemFromUrl();
     updateSortIndicators();
     loadSystems().then(() => loadTalkgroups()).then(refreshDashboard);
+
+    // Faster calls refresh while autoplaying a TG/category so stacked clips
+    // enter the queue before the current one finishes.
+    setInterval(() => {{
+      if (rangeSearchActive) return;
+      if (autoPlayEnabled && hasAutoPlayScope()) {{
+        refreshCallsAndActivity();
+      }}
+    }}, AUTOPLAY_POLL_MS);
     setInterval(refreshDashboard, POLL_MS);
     setInterval(refreshQueueStats, QUEUE_POLL_MS);
   </script>

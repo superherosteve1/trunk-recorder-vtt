@@ -991,7 +991,12 @@ def claim_completed_wav_for_compression() -> dict[str, Any] | None:
         return dict(row) if row else None
 
 
-def mark_call_failed(call_id: int, *, error_message: str, increment_retry: bool) -> None:
+def mark_call_failed(
+    call_id: int,
+    *,
+    error_message: str,
+    increment_retry: bool,
+) -> None:
     now = _utc_now()
     with get_db() as conn:
         if increment_retry:
@@ -1008,16 +1013,19 @@ def mark_call_failed(call_id: int, *, error_message: str, increment_retry: bool)
                 (now, error_message, call_id),
             )
         else:
+            # Permanent failure: exhaust retries so claim_pending_call will not
+            # immediately reclaim this row in a tight loop (e.g. missing audio).
             conn.execute(
                 """
                 UPDATE calls
                 SET status = 'failed',
                     updated_at = ?,
                     error_message = ?,
-                    transcript = ''
+                    transcript = '',
+                    retry_count = ?
                 WHERE id = ?
                 """,
-                (now, error_message, call_id),
+                (now, error_message, settings.max_retries, call_id),
             )
 
 
