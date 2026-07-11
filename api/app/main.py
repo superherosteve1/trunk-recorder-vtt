@@ -272,6 +272,11 @@ async def get_calls(
     offset: int = Query(0, ge=0),
     status_filter: str | None = Query(None, alias="status"),
     talkgroup: int | None = Query(None),
+    category: str | None = Query(
+        None,
+        max_length=200,
+        description="Filter to talkgroups whose talk_groups.csv Category matches exactly",
+    ),
     system: str | None = Query(None),
     created_after: str | None = Query(None, alias="from"),
     created_before: str | None = Query(None, alias="to"),
@@ -290,6 +295,7 @@ async def get_calls(
         offset=offset,
         status=status_filter,
         talkgroup=talkgroup,
+        category=category,
         system_name=system,
         created_after=created_after,
         created_before=created_before,
@@ -301,6 +307,7 @@ async def get_calls(
         "limit": limit,
         "offset": offset,
         "talkgroup": talkgroup,
+        "category": category,
         "system": system,
         "from": created_after,
         "to": created_before,
@@ -739,6 +746,10 @@ async def get_call_audio(call_id: int) -> FileResponse:
         wav_path,
         media_type=audio_media_type(wav_path),
         content_disposition_type="inline",
+        headers={
+            # Short private cache; ?f=ext on the dashboard URL busts when WAV→MP3.
+            "Cache-Control": "private, max-age=120",
+        },
     )
 
 
@@ -982,9 +993,11 @@ def _audio_player(call: dict[str, Any]) -> str:
             '<span class="unknown-tg-indicator" title="Talk group not in talk_groups.csv — add to enable recording">📋</span>'
         )
     call_id = call["id"]
+    wav_path = str(call.get("wav_path") or "")
+    ext = Path(wav_path).suffix.lstrip(".").lower() or "bin"
     return (
         f'<audio controls preload="none" class="audio-player" '
-        f'data-call-id="{call_id}" src="/calls/{call_id}/audio"></audio>'
+        f'data-call-id="{call_id}" src="/calls/{call_id}/audio?f={html.escape(ext)}"></audio>'
     )
 
 
@@ -1093,6 +1106,12 @@ async def dashboard(request: Request) -> HTMLResponse:
     .combobox-option:hover, .combobox-option.active {{ background: #1e293b; }}
     .combobox-option strong {{ color: #f8fafc; }}
     .combobox-option span {{ display: block; color: #94a3b8; font-size: 0.8rem; margin-top: 0.15rem; }}
+    .combobox-option.category-option {{ border-bottom: 1px solid #1e293b; }}
+    .combobox-option.category-option strong {{ color: #5eead4; font-weight: 600; }}
+    .combobox-option.category-option span {{ color: #64748b; }}
+    .combobox-option.section-label {{ cursor: default; opacity: 0.7; padding-top: 0.85rem; padding-bottom: 0.25rem; }}
+    .combobox-option.section-label:hover, .combobox-option.section-label.active {{ background: transparent; }}
+    .combobox-option.section-label strong {{ color: #64748b; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; }}
     .quick-filters {{
       display: flex;
       gap: 0.45rem;
@@ -1607,14 +1626,14 @@ async def dashboard(request: Request) -> HTMLResponse:
   <div class="system-filters" id="system-filters" aria-label="Trunk Recorder systems"></div>
   <div class="toolbar">
     <div class="filter-block">
-      <label for="tg-search">Talk group</label>
+      <label for="tg-search">Talk group / category</label>
       <div class="combobox" id="tg-combobox">
         <div class="combobox-input-wrap">
           <span class="filter-chip" id="tg-chip" hidden>
             <span id="tg-chip-label"></span>
             <button type="button" id="tg-clear" title="Clear filter">×</button>
           </span>
-          <input id="tg-search" type="search" placeholder="Search by TG, tag, or description…" autocomplete="off" />
+          <input id="tg-search" type="search" placeholder="Search TG, tag, or category…" autocomplete="off" />
         </div>
         <div class="combobox-menu" id="tg-menu" hidden></div>
       </div>
@@ -1631,7 +1650,7 @@ async def dashboard(request: Request) -> HTMLResponse:
       </label>
       <label class="auto-play-toggle">
         <input type="checkbox" id="auto-play-enabled" checked />
-        Auto-play selected talk group
+        Auto-play selection
       </label>
     </div>
     <div class="filter-summary" id="auto-play-status"></div>
@@ -1700,6 +1719,7 @@ async def dashboard(request: Request) -> HTMLResponse:
     let talkgroupsCatalog = [];
     let systemsCatalog = [];
     let selectedTalkgroup = null;
+    let selectedCategory = null;
     let selectedSystem = null;
     let rangeFrom = null;
     let rangeTo = null;
@@ -2200,6 +2220,15 @@ async def dashboard(request: Request) -> HTMLResponse:
       return `${{group.talkgroup}} · ${{tag}}`;
     }}
 
+    function hasAutoPlayScope() {{
+      return selectedTalkgroup != null || Boolean(selectedCategory);
+    }}
+
+    function readCategoryFromUrl() {{
+      const value = new URLSearchParams(window.location.search).get("category");
+      return value ? value : null;
+    }}
+
     function readTalkgroupFromUrl() {{
       const value = new URLSearchParams(window.location.search).get("tg");
       if (!value) return null;
@@ -2214,10 +2243,16 @@ async def dashboard(request: Request) -> HTMLResponse:
 
     function syncFilterUrl() {{
       const url = new URL(window.location.href);
-      if (selectedTalkgroup != null) {{
-        url.searchParams.set("tg", String(selectedTalkgroup));
-      }} else {{
+      if (selectedCategory) {{
+        url.searchParams.set("category", selectedCategory);
         url.searchParams.delete("tg");
+      }} else {{
+        url.searchParams.delete("category");
+        if (selectedTalkgroup != null) {{
+          url.searchParams.set("tg", String(selectedTalkgroup));
+        }} else {{
+          url.searchParams.delete("tg");
+        }}
       }}
       if (selectedSystem) {{
         url.searchParams.set("system", selectedSystem);
@@ -2233,7 +2268,9 @@ async def dashboard(request: Request) -> HTMLResponse:
 
     function callsEndpoint() {{
       const params = new URLSearchParams({{ limit: String(CALLS_LIMIT) }});
-      if (selectedTalkgroup != null) {{
+      if (selectedCategory) {{
+        params.set("category", selectedCategory);
+      }} else if (selectedTalkgroup != null) {{
         params.set("talkgroup", String(selectedTalkgroup));
       }}
       if (selectedSystem) {{
@@ -2274,7 +2311,8 @@ async def dashboard(request: Request) -> HTMLResponse:
       if (rangeFrom) parts.push(`from ${{formatRangeLabel(rangeFrom)}}`);
       if (rangeTo) parts.push(`to ${{formatRangeLabel(rangeTo)}}`);
       if (transcriptQuery) parts.push(`transcript “${{transcriptQuery}}”`);
-      if (selectedTalkgroup != null) parts.push(`TG ${{selectedTalkgroup}}`);
+      if (selectedCategory) parts.push(`category ${{selectedCategory}}`);
+      else if (selectedTalkgroup != null) parts.push(`TG ${{selectedTalkgroup}}`);
       if (selectedSystem) parts.push(selectedSystem);
       note.hidden = false;
       note.textContent = `Search active · ${{parts.join(" · ")}} · live updates paused`;
@@ -2462,6 +2500,14 @@ async def dashboard(request: Request) -> HTMLResponse:
       }}
     }}
 
+    function audioSrcForCall(call) {{
+      // Cache-bust when worker compresses WAV→MP3 so the browser does not mix formats.
+      const path = String(call.wav_path || "");
+      const dot = path.lastIndexOf(".");
+      const ext = dot >= 0 ? path.slice(dot + 1).toLowerCase() : "bin";
+      return `/calls/${{call.id}}/audio?f=${{encodeURIComponent(ext)}}`;
+    }}
+
     function renderAudioCell(call) {{
       if (call.status === "encrypted") {{
         if (!recordsRequest.enabled) {{
@@ -2475,12 +2521,12 @@ async def dashboard(request: Request) -> HTMLResponse:
       if (call.status === "unknown_talkgroup") {{
         return `<span class="unknown-tg-indicator" title="Talk group not in talk_groups.csv — add to enable recording">📋</span>`;
       }}
-      return `<audio controls preload="none" class="audio-player" data-call-id="${{call.id}}" src="/calls/${{call.id}}/audio"></audio>`;
+      return `<audio controls preload="none" class="audio-player" data-call-id="${{call.id}}" src="${{audioSrcForCall(call)}}"></audio>`;
     }}
 
     function updateAutoPlayStatus() {{
-      if (!selectedTalkgroup) {{
-        autoPlayStatus.textContent = "Select a talk group to auto-play";
+      if (!hasAutoPlayScope()) {{
+        autoPlayStatus.textContent = "Select a talk group or category to auto-play";
         return;
       }}
       if (!autoPlayEnabled) {{
@@ -2498,6 +2544,8 @@ async def dashboard(request: Request) -> HTMLResponse:
           : "Playing";
       }} else if (playQueue.length) {{
         autoPlayStatus.textContent = `${{playQueue.length}} queued to latest`;
+      }} else if (selectedCategory) {{
+        autoPlayStatus.textContent = "Listening for new calls in this category";
       }} else {{
         autoPlayStatus.textContent = "Listening for new calls on this talk group";
       }}
@@ -2527,7 +2575,7 @@ async def dashboard(request: Request) -> HTMLResponse:
       if (audioUnlocked) return;
       audioUnlocked = true;
       updateAutoPlayStatus();
-      if (autoPlayEnabled && selectedTalkgroup != null && !isPlayingQueue) {{
+      if (autoPlayEnabled && hasAutoPlayScope() && !isPlayingQueue) {{
         processPlayQueue();
       }}
     }}
@@ -2624,7 +2672,7 @@ async def dashboard(request: Request) -> HTMLResponse:
     }}
 
     async function processPlayQueue() {{
-      if (!autoPlayEnabled || selectedTalkgroup == null) {{
+      if (!autoPlayEnabled || !hasAutoPlayScope()) {{
         updateAutoPlayStatus();
         return;
       }}
@@ -2646,7 +2694,7 @@ async def dashboard(request: Request) -> HTMLResponse:
     }}
 
     function enqueueNewCalls(calls) {{
-      if (!autoPlayEnabled || selectedTalkgroup == null) return;
+      if (!autoPlayEnabled || !hasAutoPlayScope()) return;
       const newCalls = calls
         .filter((call) => !knownCallIds.has(call.id))
         .sort((a, b) => a.id - b.id);
@@ -2722,10 +2770,14 @@ async def dashboard(request: Request) -> HTMLResponse:
     function renderRows(calls) {{
       if (!calls.length) {{
         let message = "No calls yet";
-        if (selectedSystem && selectedTalkgroup != null) {{
+        if (selectedSystem && selectedCategory) {{
+          message = `No calls for ${{selectedCategory}} on ${{selectedSystem}}`;
+        }} else if (selectedSystem && selectedTalkgroup != null) {{
           message = `No calls for this talk group on ${{selectedSystem}}`;
         }} else if (selectedSystem) {{
           message = `No calls for ${{selectedSystem}} yet`;
+        }} else if (selectedCategory) {{
+          message = `No calls for ${{selectedCategory}} yet`;
         }} else if (selectedTalkgroup != null) {{
           message = "No calls for this talk group yet";
         }}
@@ -2770,6 +2822,17 @@ async def dashboard(request: Request) -> HTMLResponse:
       }}).join("");
     }}
 
+    function callsFingerprint(calls) {{
+      return calls.map((call) => [
+        call.id,
+        call.status,
+        call.updated_at || "",
+        call.has_alert ?? "",
+        (call.transcript || "").length,
+        call.wav_path || "",
+      ].join(":")).join("|");
+    }}
+
     function renderTableBody() {{
       const audioState = captureAudioState();
       const playingId = currentAutoPlayId;
@@ -2780,6 +2843,8 @@ async def dashboard(request: Request) -> HTMLResponse:
       }}
       const scrollY = window.scrollY;
 
+      // Stop current players before destroying nodes — detached <audio> can keep playing.
+      pauseAllAudio();
       document.getElementById("calls-body").innerHTML = renderRows(sortCalls(getVisibleCalls()));
       restoreAudioState(audioState);
 
@@ -2795,6 +2860,20 @@ async def dashboard(request: Request) -> HTMLResponse:
 
       updateFilterUi();
       updateAutoPlayStatus();
+    }}
+
+    let lastCallsFingerprint = "";
+
+    function applyCallsData(calls, {{ forceTable = false }} = {{}}) {{
+      callsData = calls;
+      const fingerprint = callsFingerprint(calls);
+      if (forceTable || fingerprint !== lastCallsFingerprint) {{
+        lastCallsFingerprint = fingerprint;
+        renderTableBody();
+      }} else {{
+        updateFilterUi();
+        updateAutoPlayStatus();
+      }}
     }}
 
     function updateStats(counts) {{
@@ -2827,23 +2906,78 @@ async def dashboard(request: Request) -> HTMLResponse:
       return options;
     }}
 
+    function listCategoryOptions(query = "") {{
+      const needle = query.trim().toLowerCase();
+      const byCat = new Map();
+      for (const group of talkgroupsCatalog) {{
+        const cat = String(group.category || "").trim();
+        if (!cat) continue;
+        if (needle && !cat.toLowerCase().includes(needle)) continue;
+        const entry = byCat.get(cat) || {{ category: cat, talkgroup_count: 0, call_count: 0 }};
+        entry.talkgroup_count += 1;
+        entry.call_count += Number(group.call_count || 0);
+        byCat.set(cat, entry);
+      }}
+      let categories = [...byCat.values()];
+      if (!needle) {{
+        const withCalls = categories.filter((item) => item.call_count > 0);
+        if (withCalls.length) categories = withCalls;
+      }}
+      categories.sort((a, b) => {{
+        if (b.call_count !== a.call_count) return b.call_count - a.call_count;
+        return a.category.localeCompare(b.category);
+      }});
+      return categories;
+    }}
+
     function renderTalkgroupMenu(query = "") {{
-      const options = filterTalkgroupOptions(query);
-      activeMenuIndex = options.length ? 0 : -1;
-      if (!options.length) {{
-        tgMenu.innerHTML = `<button type="button" class="combobox-option" disabled>No matching talk groups</button>`;
+      const categories = listCategoryOptions(query);
+      const groups = filterTalkgroupOptions(query);
+      const parts = [];
+      let optionIndex = 0;
+
+      if (categories.length) {{
+        parts.push(`<button type="button" class="combobox-option section-label" disabled><strong>Categories</strong></button>`);
+        for (const item of categories) {{
+          const activeClass = optionIndex === activeMenuIndex ? " active" : "";
+          const countLabel = item.call_count
+            ? `${{item.talkgroup_count}} talk groups · ${{item.call_count}} calls`
+            : `${{item.talkgroup_count}} talk groups`;
+          parts.push(`<button type="button" class="combobox-option category-option${{activeClass}}" data-category="${{esc(item.category)}}" data-menu-index="${{optionIndex}}">
+            <strong>📁 ${{esc(item.category)}}</strong>
+            <span>${{esc(countLabel)}}</span>
+          </button>`);
+          optionIndex += 1;
+        }}
+      }}
+
+      if (groups.length) {{
+        parts.push(`<button type="button" class="combobox-option section-label" disabled><strong>Talk groups</strong></button>`);
+        for (const group of groups) {{
+          const activeClass = optionIndex === activeMenuIndex ? " active" : "";
+          const count = group.call_count ? `${{group.call_count}} calls` : "no calls yet";
+          const categoryBit = group.category ? `${{esc(group.category)}} · ` : "";
+          const description = group.description
+            ? `<span>${{categoryBit}}${{esc(group.description)}} · ${{esc(count)}}</span>`
+            : `<span>${{categoryBit}}${{esc(count)}}</span>`;
+          parts.push(`<button type="button" class="combobox-option${{activeClass}}" data-tg="${{group.talkgroup}}" data-menu-index="${{optionIndex}}">
+            <strong>${{esc(talkgroupLabel(group))}}</strong>
+            ${{description}}
+          </button>`);
+          optionIndex += 1;
+        }}
+      }}
+
+      activeMenuIndex = optionIndex ? 0 : -1;
+      if (!parts.length) {{
+        tgMenu.innerHTML = `<button type="button" class="combobox-option" disabled>No matching talk groups or categories</button>`;
         tgMenu.hidden = false;
         return;
       }}
-      tgMenu.innerHTML = options.map((group, index) => {{
-        const activeClass = index === activeMenuIndex ? " active" : "";
-        const count = group.call_count ? `${{group.call_count}} calls` : "no calls yet";
-        const description = group.description ? `<span>${{esc(group.description)}} · ${{esc(count)}}</span>` : `<span>${{esc(count)}}</span>`;
-        return `<button type="button" class="combobox-option${{activeClass}}" data-tg="${{group.talkgroup}}">
-          <strong>${{esc(talkgroupLabel(group))}}</strong>
-          ${{description}}
-        </button>`;
-      }}).join("");
+      tgMenu.innerHTML = parts.join("");
+      for (const option of tgMenu.querySelectorAll(".combobox-option[data-menu-index]")) {{
+        option.classList.toggle("active", Number(option.dataset.menuIndex) === activeMenuIndex);
+      }}
       tgMenu.hidden = false;
     }}
 
@@ -2888,23 +3022,28 @@ async def dashboard(request: Request) -> HTMLResponse:
 
     function updateFilterUi({{ scrollActiveQuickFilter = false }} = {{}}) {{
       const selected = getSelectedTalkgroupMeta();
-      if (selectedTalkgroup != null && selected) {{
+      if (selectedCategory) {{
+        tgChip.hidden = false;
+        tgChipLabel.textContent = `📁 ${{selectedCategory}}`;
+        tgSearch.placeholder = "Change talk group or category…";
+      }} else if (selectedTalkgroup != null && selected) {{
         tgChip.hidden = false;
         tgChipLabel.textContent = talkgroupLabel(selected);
-        tgSearch.placeholder = "Change talk group…";
+        tgSearch.placeholder = "Change talk group or category…";
       }} else if (selectedTalkgroup != null) {{
         tgChip.hidden = false;
         tgChipLabel.textContent = `TG ${{selectedTalkgroup}}`;
-        tgSearch.placeholder = "Change talk group…";
+        tgSearch.placeholder = "Change talk group or category…";
       }} else {{
         tgChip.hidden = true;
-        tgSearch.placeholder = "Search by TG, tag, or description…";
+        tgSearch.placeholder = "Search TG, tag, or category…";
       }}
 
       const visible = getVisibleCalls();
       const parts = [];
       if (selectedSystem) parts.push(`system ${{selectedSystem}}`);
-      if (selectedTalkgroup != null) parts.push("this talk group");
+      if (selectedCategory) parts.push(`category ${{selectedCategory}}`);
+      else if (selectedTalkgroup != null) parts.push("this talk group");
       if (rangeSearchActive) {{
         const bits = [];
         if (rangeFrom || rangeTo) bits.push("date/time");
@@ -2922,7 +3061,7 @@ async def dashboard(request: Request) -> HTMLResponse:
 
       let activeQuickFilter = null;
       for (const button of quickFilters.querySelectorAll(".quick-filter")) {{
-        const isActive = Number(button.dataset.tg) === selectedTalkgroup;
+        const isActive = selectedTalkgroup != null && Number(button.dataset.tg) === selectedTalkgroup;
         button.classList.toggle("active", isActive);
         if (isActive) activeQuickFilter = button;
       }}
@@ -2982,6 +3121,7 @@ async def dashboard(request: Request) -> HTMLResponse:
 
     function selectSystem(system, {{ refresh = true }} = {{}}) {{
       selectedSystem = system ? String(system) : null;
+      lastCallsFingerprint = "";
       resetAutoPlayState();
       syncFilterUrl();
       renderSystemFilters();
@@ -2991,8 +3131,10 @@ async def dashboard(request: Request) -> HTMLResponse:
     }}
 
     function selectTalkgroup(talkgroup, {{ refresh = true }} = {{}}) {{
+      selectedCategory = null;
       selectedTalkgroup = talkgroup == null ? null : Number(talkgroup);
       if (selectedTalkgroup == null) selectedDistrictId = null;
+      lastCallsFingerprint = "";
       tgSearch.value = "";
       tgMenu.hidden = true;
       activeMenuIndex = -1;
@@ -3004,6 +3146,32 @@ async def dashboard(request: Request) -> HTMLResponse:
       if (districtStatsCache) renderDistrictMap(districtStatsCache);
       if (refresh) refreshCallsAndActivity();
       unlockAudioPlayback();
+    }}
+
+    function selectCategory(category, {{ refresh = true }} = {{}}) {{
+      const next = category ? String(category) : null;
+      selectedTalkgroup = null;
+      selectedDistrictId = null;
+      selectedCategory = next;
+      lastCallsFingerprint = "";
+      tgSearch.value = "";
+      tgMenu.hidden = true;
+      activeMenuIndex = -1;
+      clearActivityHighlight(null);
+      resetAutoPlayState();
+      syncFilterUrl();
+      updateFilterUi();
+      if (districtStatsCache) renderDistrictMap(districtStatsCache);
+      if (refresh) refreshCallsAndActivity();
+      unlockAudioPlayback();
+    }}
+
+    function clearTalkgroupOrCategory() {{
+      if (selectedCategory) {{
+        selectCategory(null);
+      }} else {{
+        selectTalkgroup(null);
+      }}
     }}
 
     async function loadSystems() {{
@@ -3054,10 +3222,7 @@ async def dashboard(request: Request) -> HTMLResponse:
         if (!callsRes.ok) return;
         const {{ calls }} = await callsRes.json();
         if (signal.aborted) return;
-        const audioState = captureAudioState();
-        callsData = calls;
-        renderTableBody();
-        restoreAudioState(audioState);
+        applyCallsData(calls);
         if (!rangeSearchActive) enqueueNewCalls(calls);
         await loadActivityChart();
       }} catch (err) {{
@@ -3080,10 +3245,7 @@ async def dashboard(request: Request) -> HTMLResponse:
         const {{ calls }} = await callsRes.json();
         const health = await healthRes.json();
         if (signal.aborted) return;
-        const audioState = captureAudioState();
-        callsData = calls;
-        renderTableBody();
-        restoreAudioState(audioState);
+        applyCallsData(calls);
         if (!rangeSearchActive) enqueueNewCalls(calls);
         updateStats(health.queue);
         updateBackendLabel(health);
@@ -3138,7 +3300,7 @@ async def dashboard(request: Request) -> HTMLResponse:
     tgSearch.addEventListener("focus", () => renderTalkgroupMenu(tgSearch.value));
     tgSearch.addEventListener("input", () => renderTalkgroupMenu(tgSearch.value));
     tgSearch.addEventListener("keydown", (event) => {{
-      const options = [...tgMenu.querySelectorAll(".combobox-option:not([disabled])")];
+      const options = [...tgMenu.querySelectorAll(".combobox-option[data-menu-index]")];
       if (event.key === "ArrowDown") {{
         event.preventDefault();
         if (tgMenu.hidden) renderTalkgroupMenu(tgSearch.value);
@@ -3149,7 +3311,7 @@ async def dashboard(request: Request) -> HTMLResponse:
       }} else if (event.key === "Enter") {{
         event.preventDefault();
         if (activeMenuIndex >= 0 && options[activeMenuIndex]) {{
-          selectTalkgroup(options[activeMenuIndex].dataset.tg);
+          activateMenuOption(options[activeMenuIndex]);
           return;
         }}
         const direct = Number(tgSearch.value.trim());
@@ -3167,13 +3329,24 @@ async def dashboard(request: Request) -> HTMLResponse:
       options[activeMenuIndex]?.scrollIntoView({{ block: "nearest" }});
     }});
 
-    tgMenu.addEventListener("click", (event) => {{
-      const option = event.target.closest(".combobox-option[data-tg]");
+    function activateMenuOption(option) {{
       if (!option) return;
-      selectTalkgroup(option.dataset.tg);
+      if (option.dataset.category) {{
+        selectCategory(option.dataset.category);
+        return;
+      }}
+      if (option.dataset.tg) {{
+        selectTalkgroup(option.dataset.tg);
+      }}
+    }}
+
+    tgMenu.addEventListener("click", (event) => {{
+      const option = event.target.closest(".combobox-option[data-menu-index]");
+      if (!option) return;
+      activateMenuOption(option);
     }});
 
-    tgClear.addEventListener("click", () => selectTalkgroup(null));
+    tgClear.addEventListener("click", () => clearTalkgroupOrCategory());
 
     systemFilters.addEventListener("click", (event) => {{
       const button = event.target.closest(".system-filter[data-system]");
@@ -3220,7 +3393,7 @@ async def dashboard(request: Request) -> HTMLResponse:
 
       pauseAllAudio(callId);
 
-      if (!autoPlayEnabled || selectedTalkgroup == null) {{
+      if (!autoPlayEnabled || !hasAutoPlayScope()) {{
         isPlayingQueue = false;
         currentAutoPlayId = null;
         playQueue = [];
@@ -3263,7 +3436,7 @@ async def dashboard(request: Request) -> HTMLResponse:
         currentAutoPlayId = null;
         pauseAllAudio();
         highlightPlayingRow(null);
-      }} else if (selectedTalkgroup != null) {{
+      }} else if (hasAutoPlayScope()) {{
         processPlayQueue();
       }}
       updateAutoPlayStatus();
@@ -3283,7 +3456,8 @@ async def dashboard(request: Request) -> HTMLResponse:
       }});
     }}
 
-    selectedTalkgroup = readTalkgroupFromUrl();
+    selectedCategory = readCategoryFromUrl();
+    selectedTalkgroup = selectedCategory ? null : readTalkgroupFromUrl();
     selectedSystem = readSystemFromUrl();
     updateSortIndicators();
     loadSystems().then(() => loadTalkgroups()).then(refreshDashboard);

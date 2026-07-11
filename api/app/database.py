@@ -141,6 +141,18 @@ def lookup_talkgroup_tag(talkgroup: int) -> str | None:
     return tag or None
 
 
+def talkgroup_ids_for_category(category: str) -> list[int]:
+    """Return catalog talkgroup IDs whose Category exactly matches ``category``."""
+    needle = (category or "").strip()
+    if not needle:
+        return []
+    return [
+        int(item["talkgroup"])
+        for item in load_talkgroups_catalog(settings.data_dir / "talk_groups.csv")
+        if str(item.get("category") or "") == needle and item.get("talkgroup") is not None
+    ]
+
+
 def classify_call_addressing(
     *,
     talkgroup: int,
@@ -332,6 +344,7 @@ def list_calls(
     offset: int = 0,
     status: str | None = None,
     talkgroup: int | None = None,
+    category: str | None = None,
     system_name: str | None = None,
     created_after: str | None = None,
     created_before: str | None = None,
@@ -347,6 +360,13 @@ def list_calls(
     if talkgroup is not None:
         clauses.append("talkgroup = ?")
         params.append(talkgroup)
+    elif category and category.strip():
+        category_ids = talkgroup_ids_for_category(category.strip())
+        if not category_ids:
+            return []
+        placeholders = ",".join("?" for _ in category_ids)
+        clauses.append(f"talkgroup IN ({placeholders})")
+        params.extend(category_ids)
     if system_name:
         clauses.append("system_name = ?")
         params.append(system_name)
