@@ -1,8 +1,51 @@
 # trunk-recorder-vtt
 
-Dockerized transcription pipeline for [Trunk Recorder](https://github.com/TrunkRecorder/trunk-recorder). Each recorded call (WAV + JSON metadata) is ingested via an `uploadScript`, queued, and transcribed using a Whisper or faster-whisper endpoint on your network.
+Dockerized transcription pipeline for [Trunk Recorder](https://github.com/TrunkRecorder/trunk-recorder). Each recorded call (WAV + JSON metadata) is ingested via an `uploadScript`, queued, and transcribed using a Whisper or faster-whisper endpoint on your network — or transcribed on the edge and archived by a cloud API.
 
 ![trunk-recorder-vtt screenshot](./assets/screenshot.png)
+
+## Deployment modes
+
+### All-in-one Docker (default)
+
+Trunk Recorder uploads WAV + JSON to the API. The in-process worker calls Whisper and stores the transcript. Use this when the API and Whisper share a LAN (or Docker Compose on one host).
+
+```
+HackRF / SDR
+     │
+     ▼
+Trunk Recorder ──upload.sh──▶ trunk-recorder-vtt (Docker)
+                                      │
+                    ┌─────────────────┴─────────────────┐
+                    ▼                                   ▼
+           Whisper endpoint                  faster-whisper endpoint
+                    └─────────────────┬─────────────────┘
+                                      ▼
+                              SQLite + web dashboard
+```
+
+Keep `TRANSCRIPTION_WORKER_ENABLED=true` (default). Point `uploadScript` at `scripts/upload.sh`.
+
+### Edge transcription + cloud archive API
+
+Whisper stays on your machine (local compute / electricity). The cloud-hosted API only accepts finished packages (audio + transcript) and serves the dashboard. No Whisper dependency in the cloud container.
+
+```
+User LAN                              Cloud (Azure / AWS / k8s)
+────────                              ────────────────────────
+Trunk Recorder
+     │
+     ▼
+upload-transcribed.sh ──▶ local Whisper
+     │                         │
+     └──── MP3 + transcript ───┴──▶ POST /calls ──▶ API + SQLite + dashboard
+```
+
+1. On the **cloud API**, set `TRANSCRIPTION_WORKER_ENABLED=false`. Uploads without a non-empty `transcript` form field return **HTTP 400**.
+2. On the **edge**, run a local OpenAI-compatible Whisper HTTP server and point Trunk Recorder at `scripts/upload-transcribed.sh` (or keep `upload.sh` with `VTT_LOCAL_TRANSCRIBE=1`).
+3. Set `VTT_API_URL` to the cloud API and `WHISPER_API_URL` to the local Whisper endpoint. The script compresses WAV → MP3 (mono, `AUDIO_BITRATE`, default 32k) before upload.
+
+Encrypted / unknown-TG metadata relay (`scripts/tr-encrypted-relay.py`) is unchanged — metadata-only POSTs do not need a transcript.
 
 ## Architecture
 
@@ -75,6 +118,8 @@ cp scripts/upload.sh ~/trunk-recorder/
 cp /path/from/old/system/config/talk_groups.csv ~/trunk-recorder/config/
 chmod +x ~/trunk-recorder/upload.sh
 ```
+
+For edge transcription against a remote API, also copy `scripts/upload-transcribed.sh`, set `uploadScript` to it (or `VTT_LOCAL_TRANSCRIBE=1`), and ensure `ffmpeg` plus a local Whisper HTTP server are available.
 
 If Trunk Recorder still runs in Docker on the new host, set `captureDir` back to `/app/media` and mount that volume in your TR container.
 

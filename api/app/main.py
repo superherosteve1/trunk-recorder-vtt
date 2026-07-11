@@ -14,7 +14,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from app.alerts import transcript_alert_emojis
-from app.audio_storage import audio_media_type
+from app.audio_storage import audio_media_type, compress_call_audio
 from app.config import settings
 from app.database import (
     classify_call_addressing,
@@ -33,9 +33,13 @@ from app.database import (
     list_system_stats,
     list_talkgroup_stats,
     load_talkgroups_catalog,
+    mark_call_completed,
 )
 from app.districts import geojson_path, get_district_activity, list_agencies
 from app.worker import worker
+
+_ALLOWED_AUDIO_EXTS = frozenset({".wav", ".mp3", ".ogg", ".opus", ".m4a", ".aac"})
+_COMPRESSED_AUDIO_EXTS = frozenset({".mp3", ".ogg", ".opus"})
 
 logging.basicConfig(
     level=logging.INFO,
@@ -79,9 +83,16 @@ def verify_api_key(
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
-    await worker.start()
+    if settings.transcription_worker_enabled:
+        await worker.start()
+    else:
+        logger.info(
+            "Transcription worker disabled (TRANSCRIPTION_WORKER_ENABLED=false); "
+            "POST /calls requires a non-empty transcript"
+        )
     yield
-    await worker.stop()
+    if settings.transcription_worker_enabled:
+        await worker.stop()
 
 
 app = FastAPI(
@@ -99,6 +110,7 @@ async def health() -> dict[str, Any]:
         "status": "ok",
         "transcription_backend": settings.transcription_backend.value,
         "transcription_fallback": settings.transcription_fallback,
+        "transcription_worker_enabled": settings.transcription_worker_enabled,
         "queue": counts,
     }
 
@@ -108,6 +120,8 @@ async def ingest_call(
     call_audio: UploadFile = File(...),
     call_json: UploadFile | None = File(None),
     call_metadata: str | None = Form(None),
+    transcript: str | None = Form(None),
+    backend_used: str | None = Form(None),
 ) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
 
@@ -129,18 +143,65 @@ async def ingest_call(
             "reason": f"call_length {call_length}s below minimum {settings.min_call_length}s",
         }
 
+    transcript_text = (transcript or "").strip()
+    if not transcript_text and not settings.transcription_worker_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "transcript is required when TRANSCRIPTION_WORKER_ENABLED=false "
+                "(edge-transcribe clients should POST audio + transcript)"
+            ),
+        )
+
     call_uuid = uuid.uuid4().hex
-    wav_filename = f"{call_uuid}.wav"
+    orig_suffix = Path(call_audio.filename or "call.wav").suffix.lower()
+    if orig_suffix not in _ALLOWED_AUDIO_EXTS:
+        orig_suffix = ".wav"
+    audio_filename = f"{call_uuid}{orig_suffix}"
     json_filename = f"{call_uuid}.json"
-    wav_path = settings.audio_dir / wav_filename
+    audio_path = settings.audio_dir / audio_filename
     json_path = settings.audio_dir / json_filename
 
-    with wav_path.open("wb") as out:
+    with audio_path.open("wb") as out:
         shutil.copyfileobj(call_audio.file, out)
 
     json_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
-    call_id = insert_call(wav_path=wav_path, json_path=json_path, metadata=metadata)
+    call_id = insert_call(wav_path=audio_path, json_path=json_path, metadata=metadata)
+
+    if transcript_text:
+        stored_path = audio_path
+        # Skip recompression when the client already uploaded mp3/ogg/opus.
+        if (
+            settings.audio_compress
+            and audio_path.suffix.lower() not in _COMPRESSED_AUDIO_EXTS
+        ):
+            compressed = compress_call_audio(audio_path)
+            if compressed is not None:
+                stored_path = compressed
+        used_backend = (backend_used or "").strip() or "edge"
+        mark_call_completed(
+            call_id,
+            transcript=transcript_text,
+            backend_used=used_backend,
+            wav_path=stored_path,
+        )
+        logger.info(
+            "Completed pre-transcribed call %s system=%s talkgroup=%s length=%.1fs backend=%s",
+            call_id,
+            metadata.get("short_name"),
+            metadata.get("talkgroup"),
+            call_length,
+            used_backend,
+        )
+        return {
+            "accepted": True,
+            "call_id": call_id,
+            "status": "completed",
+            "wav_path": str(stored_path),
+            "backend_used": used_backend,
+        }
+
     logger.info(
         "Queued call %s system=%s talkgroup=%s length=%.1fs",
         call_id,
@@ -153,7 +214,7 @@ async def ingest_call(
         "accepted": True,
         "call_id": call_id,
         "status": "pending",
-        "wav_path": str(wav_path),
+        "wav_path": str(audio_path),
     }
 
 

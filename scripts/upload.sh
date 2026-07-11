@@ -20,14 +20,19 @@ _env_file="${_script_dir}/../.env"
 if [[ -f "$_env_file" ]]; then
   while IFS='=' read -r _key _val; do
     case "$_key" in
-      API_KEY|VTT_API_KEY|VTT_API_URL|MIN_CALL_LENGTH)
+      API_KEY|VTT_API_KEY|VTT_API_URL|MIN_CALL_LENGTH|VTT_LOCAL_TRANSCRIBE)
         # Strip optional surrounding quotes from .env values
         _val="${_val%\"}" ; _val="${_val#\"}"
         _val="${_val%\'}" ; _val="${_val#\'}"
         export "${_key}=${_val}"
         ;;
     esac
-  done < <(grep -E '^(API_KEY|VTT_API_KEY|VTT_API_URL|MIN_CALL_LENGTH)=' "$_env_file")
+  done < <(grep -E '^(API_KEY|VTT_API_KEY|VTT_API_URL|MIN_CALL_LENGTH|VTT_LOCAL_TRANSCRIBE)=' "$_env_file")
+fi
+
+# Edge mode: transcribe locally, then POST completed package to the API
+if [[ "${VTT_LOCAL_TRANSCRIBE:-0}" == "1" ]]; then
+  exec "${_script_dir}/upload-transcribed.sh" "$@"
 fi
 
 wav="$1"
