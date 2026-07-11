@@ -1,3 +1,4 @@
+import asyncio
 import html
 import json
 import logging
@@ -93,7 +94,9 @@ app = FastAPI(
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    counts = count_calls_by_status()
+    # Run SQLite off the event loop — sync NFS DB work in async def would stall
+    # probes and the whole API under load (Cloudflare 502 / CrashLoopBackOff).
+    counts = await asyncio.to_thread(count_calls_by_status)
     return {
         "status": "ok",
         "transcription_backend": settings.transcription_backend.value,
