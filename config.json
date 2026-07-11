@@ -1,0 +1,76 @@
+{
+  "ver": 2,
+  "frequencyFormat": "mhz",
+  "sources": [
+    {
+      "center": 860875000.0,
+      "rate": 7992000,
+      "ppm": 0.0,
+      "ifGain": 40,
+      "bbGain": 42,
+      "mixGain": 0,
+      "lnaGain": 0,
+      "pgaGain": 12,
+      "tiaGain": 0,
+      "gain": 0,
+      "ppa_adjust_interval": 0.05,
+      "digitalRecorders": 29,
+      "driver": "osmosdr",
+      "device": "hackrf=0000000000000000118461dc21783b03"
+    },
+    {
+      "center": 857021875.0,
+      "rate": 7992000,
+      "ppm": 0,
+      "ifGain": 26,
+      "bbGain": 40,
+      "mixGain": 0,
+      "lnaGain": 0,
+      "pgaGain": 14,
+      "tiaGain": 0,
+      "gain": 0,
+      "ppa_adjust_interval": 0.05,
+      "digitalRecorders": 29,
+      "driver": "osmosdr",
+      "device": "hackrf=0000000000000000114864dc38480e1b"
+    }
+  ],
+  "systems": [
+    {
+      "control_channels": [859712500,856137500, 859212500, 859612500],
+      "type": "p25",
+      "talkgroupsFile": "config/talk_groups.csv",
+      "hideEncrypted": false,
+      "hideUnknownTalkgroups": false,
+      "recordUnknown": false,
+      "modulation": "qpsk",
+      "multiSite": true,
+      "multiSiteSystemNumber": 1,
+      "multiSiteSystemName": "Denver-Aurora",
+      "shortName": "Denver",
+      "audioArchive": true,
+      "callLog": true,
+      "uploadScript": "/tmp/tr-upload.sh"
+    },
+    {
+      "control_channels": [856962500, 856937500, 857762500, 856987500],
+      "type": "p25",
+      "talkgroupsFile": "config/talk_groups.csv",
+      "hideEncrypted": false,
+      "hideUnknownTalkgroups": false,
+      "recordUnknown": false,
+      "modulation": "qpsk",
+      "multiSite": true,
+      "multiSiteSystemNumber": 2,
+      "multiSiteSystemName": "Denver-Aurora",
+      "shortName": "Aurora",
+      "audioArchive": true,
+      "callLog": true,
+      "uploadScript": "/tmp/tr-upload.sh"
+    }
+  ],
+  "tempDir": "/tmp/tr/t",
+  "captureDir": "/tmp/tr/r",
+  "compressWav": false,
+  "callTimeout": 3
+}

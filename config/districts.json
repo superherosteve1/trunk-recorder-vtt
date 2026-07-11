@@ -1,0 +1,100 @@
+{
+  "district_id_properties": ["DIST_NUM", "POLICE_DISTRICT", "DISTRICT", "district"],
+  "agencies": [
+    {
+      "id": "denver",
+      "label": "Denver",
+      "geojson": "denver_police_districts.geojson",
+      "catalog_keywords": ["denver", "dpd"]
+    },
+    {
+      "id": "aurora",
+      "label": "Aurora",
+      "geojson": "aurora_police_districts.geojson",
+      "catalog_keywords": ["aurora", "apd"]
+    }
+  ],
+  "districts": [
+    {
+      "id": "denver-1",
+      "agency": "denver",
+      "district": 1,
+      "label": "DPD Dist 1",
+      "talkgroups": [35050, 35052],
+      "primary_talkgroup": 35050
+    },
+    {
+      "id": "denver-2",
+      "agency": "denver",
+      "district": 2,
+      "label": "DPD Dist 2",
+      "talkgroups": [35058, 35060],
+      "primary_talkgroup": 35058
+    },
+    {
+      "id": "denver-3",
+      "agency": "denver",
+      "district": 3,
+      "label": "DPD Dist 3",
+      "talkgroups": [35066, 35068],
+      "primary_talkgroup": 35066
+    },
+    {
+      "id": "denver-4",
+      "agency": "denver",
+      "district": 4,
+      "label": "DPD Dist 4",
+      "talkgroups": [35073, 35075],
+      "primary_talkgroup": 35073
+    },
+    {
+      "id": "denver-5",
+      "agency": "denver",
+      "district": 5,
+      "label": "DPD Dist 5",
+      "talkgroups": [35080, 35082],
+      "primary_talkgroup": 35080
+    },
+    {
+      "id": "denver-6",
+      "agency": "denver",
+      "district": 6,
+      "label": "DPD Dist 6",
+      "talkgroups": [35087, 35089, 35091],
+      "primary_talkgroup": 35087
+    },
+    {
+      "id": "denver-7",
+      "agency": "denver",
+      "district": 7,
+      "label": "DPD Dist 7 (DIA)",
+      "talkgroups": [],
+      "primary_talkgroup": null,
+      "note": "Airport / DIA — believed analog / not on this trunked system"
+    },
+    {
+      "id": "aurora-1",
+      "agency": "aurora",
+      "district": 1,
+      "label": "APD Dist 1",
+      "talkgroups": [39501],
+      "primary_talkgroup": 39501
+    },
+    {
+      "id": "aurora-2",
+      "agency": "aurora",
+      "district": 2,
+      "label": "APD Dist 2",
+      "talkgroups": [39502],
+      "primary_talkgroup": 39502
+    },
+    {
+      "id": "aurora-3",
+      "agency": "aurora",
+      "district": 3,
+      "label": "APD Dist 3",
+      "talkgroups": [39503],
+      "primary_talkgroup": 39503
+    }
+  ]
+}

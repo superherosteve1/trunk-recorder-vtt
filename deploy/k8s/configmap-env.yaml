@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sdr-trunk-vtt-env
+  namespace: sdr-trunk-vtt
+data:
+  DATA_DIR: /data
+  TRANSCRIPTION_BACKEND: openai
+  TRANSCRIPTION_FALLBACK: "true"
+  # Same LAN Whisper host used by open-webui's Ollama path pattern
+  WHISPER_API_URL: http://192.168.8.59:9000/v1/audio/transcriptions
+  WHISPER_MODEL: Large
+  WHISPER_LANGUAGE: en
+  WHISPER_PROMPT: >-
+    Police fire EMS dispatch scanner radio. 10-4, copy, en route, responding,
+    medic, unit, code, battalion, ladder, squad, engine, fire dispatch, on scene,
+    emergent. Calls often end with local 24-hour time like 0945, 1200, 1244 —
+    never dollar amounts like $12.44.
+  FASTER_WHISPER_API_URL: http://192.168.8.59:8000/transcribe
+  FASTER_WHISPER_LANGUAGE: en
+  MIN_CALL_LENGTH: "2"
+  TRANSCRIPTION_TIMEOUT: "300"
+  MAX_RETRIES: "3"
+  RECORDS_REQUEST_ENABLED: "true"
+  RECORDS_REQUEST_BUTTON_LABEL: CORA
+  RECORDS_REQUEST_TITLE: CORA (Colorado Open Records Act) audio retrieval request
+  RECORDS_REQUEST_CONTACT_LABEL: CORA
+  SITE_TITLE: Denver / Aurora Trunk Monitor
+  SITE_SUBTITLE: Trunk Recorder transcription dashboard
+  SITE_SHOW_RECORDS_HELP: "true"
+  AUDIO_COMPRESS: "true"
+  AUDIO_FORMAT: mp3
+  AUDIO_BITRATE: 32k

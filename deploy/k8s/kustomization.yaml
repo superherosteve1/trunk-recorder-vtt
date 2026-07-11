@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: sdr-trunk-vtt
+resources:
+  - namespace.yaml
+  - pv-pvc.yaml
+  - configmap-env.yaml
+  - deployment.yaml
+  - service.yaml
+# Create the Secret separately (see create-secret.sh / secret.example.yaml):
+#   kubectl apply -k deploy/k8s
+# does not include secrets by default.
+images:
+  - name: ghcr.io/billyjenkinsiii/sdr-trunk-vtt
+    newName: ghcr.io/billyjenkinsiii/sdr-trunk-vtt
+    newTag: latest

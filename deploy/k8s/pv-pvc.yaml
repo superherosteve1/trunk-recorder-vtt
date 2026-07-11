@@ -1,0 +1,36 @@
+# Static NFS volume — mirrors open-webui (Synology at 192.168.1.162).
+# Create the shared folder on the NAS first: /volume1/sdr-trunk-vtt
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-pv-sdr-trunk-vtt
+spec:
+  capacity:
+    storage: 50Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: slow
+  volumeMode: Filesystem
+  mountOptions:
+    - hard
+    - nfsvers=4.1
+  nfs:
+    server: 192.168.1.162
+    path: /volume1/sdr-trunk-vtt
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sdr-trunk-vtt-pvc
+  namespace: sdr-trunk-vtt
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: slow
+  volumeMode: Filesystem
+  resources:
+    requests:
+      storage: 50Gi
+  volumeName: nfs-pv-sdr-trunk-vtt

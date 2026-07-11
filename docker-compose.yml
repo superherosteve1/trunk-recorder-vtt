@@ -1,0 +1,47 @@
+services:
+  vtt:
+    build:
+      context: ./api
+    container_name: sdr-trunk-vtt
+    restart: unless-stopped
+    ports:
+      - "${VTT_PORT:-8080}:8080"
+    environment:
+      API_KEY: ${API_KEY:-change-me}
+      DATA_DIR: /data
+      TRANSCRIPTION_BACKEND: ${TRANSCRIPTION_BACKEND:-openai}
+      TRANSCRIPTION_FALLBACK: ${TRANSCRIPTION_FALLBACK:-true}
+      WHISPER_API_URL: ${WHISPER_API_URL:-http://host.docker.internal:9000/v1/audio/transcriptions}
+      WHISPER_API_KEY: ${WHISPER_API_KEY:-}
+      WHISPER_MODEL: ${WHISPER_MODEL:-whisper-1}
+      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-en}
+      WHISPER_PROMPT: ${WHISPER_PROMPT:-Police fire EMS dispatch scanner radio. 10-4, copy, en route, responding, medic, unit, code.}
+      FASTER_WHISPER_API_URL: ${FASTER_WHISPER_API_URL:-http://host.docker.internal:8000/transcribe}
+      FASTER_WHISPER_LANGUAGE: ${FASTER_WHISPER_LANGUAGE:-en}
+      MIN_CALL_LENGTH: ${MIN_CALL_LENGTH:-2}
+      TRANSCRIPTION_TIMEOUT: ${TRANSCRIPTION_TIMEOUT:-300}
+      MAX_RETRIES: ${MAX_RETRIES:-3}
+      RECORDS_REQUEST_ENABLED: ${RECORDS_REQUEST_ENABLED:-true}
+      RECORDS_REQUEST_BUTTON_LABEL: ${RECORDS_REQUEST_BUTTON_LABEL:-CORA}
+      RECORDS_REQUEST_TITLE: ${RECORDS_REQUEST_TITLE:-CORA (Colorado Open Records Act) audio retrieval request}
+      RECORDS_REQUEST_CONTACT_LABEL: ${RECORDS_REQUEST_CONTACT_LABEL:-CORA}
+      SITE_TITLE: ${SITE_TITLE:-Denver / Aurora Trunk Monitor}
+      SITE_SUBTITLE: ${SITE_SUBTITLE:-Trunk Recorder transcription dashboard}
+      SITE_NOTICE: ${SITE_NOTICE:-}
+      SITE_SHOW_RECORDS_HELP: ${SITE_SHOW_RECORDS_HELP:-true}
+      AUDIO_COMPRESS: ${AUDIO_COMPRESS:-true}
+      AUDIO_FORMAT: ${AUDIO_FORMAT:-mp3}
+      AUDIO_BITRATE: ${AUDIO_BITRATE:-32k}
+    volumes:
+      - vtt-data:/data
+      - ./config/talk_groups.csv:/data/talk_groups.csv:ro
+      - ./config/districts.json:/data/districts.json:ro
+      - ./config.json:/data/trunk-recorder.json:ro
+      - ./GIS:/data/gis:ro
+      - ./docs:/data/docs:ro
+    extra_hosts:
+      # Lets the container reach Whisper services on the Docker host (macOS/Windows/Linux)
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  vtt-data:

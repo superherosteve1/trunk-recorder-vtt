@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sdr-trunk-vtt
+  namespace: sdr-trunk-vtt
+  labels:
+    app: sdr-trunk-vtt
+spec:
+  # SQLite on NFS — keep a single writer
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sdr-trunk-vtt
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: sdr-trunk-vtt
+    spec:
+      # Same node preference as open-webui (optional; remove if you want any node)
+      nodeSelector:
+        kubernetes.io/hostname: k3s-node1
+      containers:
+        - name: vtt
+          # Build/push before apply — see deploy/k8s/README.md
+          image: ghcr.io/billyjenkinsiii/sdr-trunk-vtt:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: sdr-trunk-vtt-env
+          env:
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sdr-trunk-vtt-secrets
+                  key: API_KEY
+            - name: WHISPER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sdr-trunk-vtt-secrets
+                  key: WHISPER_API_KEY
+                  optional: true
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            failureThreshold: 30
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: sdr-trunk-vtt-pvc

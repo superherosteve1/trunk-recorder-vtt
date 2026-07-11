@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: sdr-trunk-vtt-tcp
+  namespace: sdr-trunk-vtt
+  labels:
+    app: sdr-trunk-vtt
+spec:
+  type: LoadBalancer
+  selector:
+    app: sdr-trunk-vtt
+  ports:
+    # Host port must not collide with open-webui (also :8080 via klipper-lb).
+    - name: http
+      port: 8088
+      targetPort: http
+      protocol: TCP
