@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Seed the Synology share without mounting NFS on the Mac.
+# Seed the share without mounting NFS on the Mac.
 # Packs config on the Mac, then mounts NFS on k3s-node1 and copies files there.
 #
 # Usage:

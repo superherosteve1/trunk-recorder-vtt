@@ -1,8 +1,8 @@
 # Remote Kubernetes deploy (mirrors open-webui on this cluster)
 
 Trunk Recorder + HackRFs stay on the Mac. VTT runs in the cluster with an NFS
-volume for audio/CSV/GIS (same Synology pattern as `open-webui`). Call metadata
-can stay on SQLite at `/data/calls.db` or move to Synology Postgres via
+volume for audio/CSV/GIS Call metadata
+can stay on SQLite at `/data/calls.db` or move to Postgres via
 `DATABASE_URL` (see Postgres cutover below).
 
 ## Layout
@@ -26,7 +26,7 @@ can stay on SQLite at `/data/calls.db` or move to Synology Postgres via
 
 ## 1. NAS share
 
-On the Synology (or NFS server), create shared folder:
+create shared folder:
 
 ```text
 /volume1/sdr-trunk-vtt
@@ -76,29 +76,9 @@ imagePullSecrets:
 ```
 ## 3. Seed config onto NFS
 
-**Do not use NFS from the Mac** — macOS ↔ Synology NFS is unreliable
-(`RPC struct is bad` / `invalid file system`). k3s nodes mount NFS fine; seed
-through a node (or SMB).
-
-### Recommended — seed via k3s-node1
-
-```bash
-# default NODE=billbixby@192.168.8.204 — override if needed:
-# NODE=you@192.168.8.204 ./deploy/k8s/seed-via-node.sh
-./deploy/k8s/seed-via-node.sh
-```
-
 That packs talkgroups / GIS / docs on the Mac, SCPs to the Pi, mounts
-`192.168.1.162:/volume1/sdr-trunk-vtt` there, and copies files into place.
+`your-nfs:/volume1/sdr-trunk-vtt` there, and copies files into place.
 
-### Alternative — SMB from the Mac
-
-Finder → Connect to Server → `smb://192.168.1.162/sdr-trunk-vtt`  
-(grant your DSM user Read/Write on the share), then:
-
-```bash
-NFS_MOUNT=/Volumes/sdr-trunk-vtt ./deploy/k8s/seed-nfs.sh
-```
 
 That writes:
 

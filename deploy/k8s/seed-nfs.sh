@@ -16,7 +16,7 @@ NFS_MOUNT="${NFS_MOUNT:-/Volumes/sdr-trunk-vtt}"
 
 if [[ ! -d "$NFS_MOUNT" ]]; then
   echo "NFS mount not found: $NFS_MOUNT" >&2
-  echo "Create/mount the Synology share first (see deploy/k8s/README.md)." >&2
+  echo "Create/mount the share first (see deploy/k8s/README.md)." >&2
   exit 1
 fi
 

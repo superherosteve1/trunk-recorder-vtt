@@ -457,7 +457,7 @@ Data is persisted under `DATA_DIR` (Docker volume `vtt-data` by default): archiv
    (`./deploy/k8s/create-secret.sh`) and restart the API.
 4. Keep a `calls.db` backup until cutover looks healthy. Audio stays on disk/NFS.
 
-See [`deploy/k8s/README.md`](deploy/k8s/README.md) for the Synology cutover checklist.
+See [`deploy/k8s/README.md`](deploy/k8s/README.md)
 
 ## Upload script filtering
 
