@@ -28,6 +28,10 @@ class Settings(BaseSettings):
 
     api_key: str = "change-me"
     data_dir: Path = Path("/data")
+    # When set (postgresql://…), use Postgres instead of SQLite at {data_dir}/calls.db.
+    database_url: str = ""
+    # Postgres schema containing the calls table (hyphenated names are supported).
+    database_schema: str = "trunk-recorder-oltp"
     host: str = "0.0.0.0"
     port: int = 8080
 

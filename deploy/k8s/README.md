@@ -1,7 +1,9 @@
 # Remote Kubernetes deploy (mirrors open-webui on this cluster)
 
 Trunk Recorder + HackRFs stay on the Mac. VTT runs in the cluster with an NFS
-volume for SQLite + audio (same Synology pattern as `open-webui`).
+volume for audio/CSV/GIS Call metadata
+can stay on SQLite at `/data/calls.db` or move to Postgres via
+`DATABASE_URL` (see Postgres cutover below).
 
 ## Layout
 
@@ -24,7 +26,7 @@ volume for SQLite + audio (same Synology pattern as `open-webui`).
 
 ## 1. NAS share
 
-On the Synology (or NFS server), create shared folder:
+create shared folder:
 
 ```text
 /volume1/sdr-trunk-vtt
@@ -42,8 +44,8 @@ This cluster’s nodes are **linux/arm64** (Raspberry Pi) and use the **Docker**
 On the Mac (from `api/`), build for the Pi architecture:
 
 ```bash
-docker build --platform linux/arm64 -t ghcr.io/billyjenkinsiii/sdr-trunk-vtt:latest .
-docker save ghcr.io/billyjenkinsiii/sdr-trunk-vtt:latest | gzip > /tmp/sdr-trunk-vtt.tar.gz
+docker build --platform linux/arm64 -t trunk-recorder-vtt:latest .
+docker save trunk-recorder-vtt:latest | gzip > /tmp/sdr-trunk-vtt.tar.gz
 scp /tmp/sdr-trunk-vtt.tar.gz YOU@192.168.8.204:/tmp/
 ```
 
@@ -61,18 +63,9 @@ and `imagePullPolicy: IfNotPresent`, so that node will use the loaded image.
 
 ```bash
 cd api
-docker build -t ghcr.io/billyjenkinsiii/sdr-trunk-vtt:latest .
-echo 'YOUR_GITHUB_PAT' | docker login ghcr.io -u billyjenkinsiii --password-stdin
-docker push ghcr.io/billyjenkinsiii/sdr-trunk-vtt:latest
-```
-
-Use a **GitHub** PAT (`write:packages`), not a Docker Hub token. If the package is private, create a pull secret (do not put tokens in git):
-
-```bash
-kubectl -n sdr-trunk-vtt create secret docker-registry ghcr-cred \
-  --docker-server=ghcr.io \
-  --docker-username=billyjenkinsiii \
-  --docker-password=YOUR_GITHUB_PAT
+docker build -t trunk-recorder-vtt:latest .
+echo 'YOUR_GITHUB_PAT' | docker login ghcr.io -u your-user --password-stdin
+docker push trunk-recorder-vtt:latest
 ```
 
 Then add under `deployment.spec.template.spec`:
@@ -83,29 +76,9 @@ imagePullSecrets:
 ```
 ## 3. Seed config onto NFS
 
-**Do not use NFS from the Mac** — macOS ↔ Synology NFS is unreliable
-(`RPC struct is bad` / `invalid file system`). k3s nodes mount NFS fine; seed
-through a node (or SMB).
-
-### Recommended — seed via k3s-node1
-
-```bash
-# default NODE=billbixby@192.168.8.204 — override if needed:
-# NODE=you@192.168.8.204 ./deploy/k8s/seed-via-node.sh
-./deploy/k8s/seed-via-node.sh
-```
-
 That packs talkgroups / GIS / docs on the Mac, SCPs to the Pi, mounts
-`192.168.1.162:/volume1/sdr-trunk-vtt` there, and copies files into place.
+`your-nfs:/volume1/sdr-trunk-vtt` there, and copies files into place.
 
-### Alternative — SMB from the Mac
-
-Finder → Connect to Server → `smb://192.168.1.162/sdr-trunk-vtt`  
-(grant your DSM user Read/Write on the share), then:
-
-```bash
-NFS_MOUNT=/Volumes/sdr-trunk-vtt ./deploy/k8s/seed-nfs.sh
-```
 
 That writes:
 
@@ -171,17 +144,3 @@ Edit `configmap-env.yaml` (or patch the ConfigMap) for another municipality:
 - `SITE_SHOW_RECORDS_HELP` — talkgroup-ID help link when the records helper is on
 
 Then `kubectl apply -k deploy/k8s` and restart the deployment. Rebuild the image only when application code changes.
-
-
-
-## Notes
-
-- **replicas: 1** — SQLite is not multi-writer safe.
-- Whisper stays on `192.168.8.59` (pods must reach that LAN IP, as open-webui
-already does for Ollama).
-- To migrate existing local data, copy `calls.db` and `audio/` into the NFS
-share before or after first start (stop the pod while copying the DB).
-- Optional: mount the same NFS share on the Mac and set
-`TR_TALKGROUPS_CSV=/Volumes/sdr-trunk-vtt/talk_groups.csv` so live auto-add
-updates the cluster catalog without re-seeding.
-

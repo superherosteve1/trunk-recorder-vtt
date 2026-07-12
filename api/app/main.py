@@ -22,7 +22,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
@@ -30,6 +30,7 @@ from app.alerts import transcript_alert_emojis
 from app.audio_storage import audio_media_type, compress_call_audio
 from app.config import settings
 from app.encryption_guard import reject_encrypted_upload
+from app.district_map import render_district_map_png, render_district_map_svg
 from app.database import (
     classify_call_addressing,
     count_calls_by_status,
@@ -51,6 +52,7 @@ from app.database import (
     mark_call_completed,
     update_call_audio_path,
 )
+from app.db import close_db_pools
 from app.districts import geojson_path, get_district_activity, list_agencies
 from app.worker import worker
 
@@ -126,6 +128,7 @@ async def lifespan(_: FastAPI):
     yield
     if settings.transcription_worker_enabled:
         await worker.stop()
+    close_db_pools()
 
 
 app = FastAPI(
@@ -563,6 +566,64 @@ async def district_stats(
 ) -> dict[str, Any]:
     """Police-district activity via talkgroup → district mapping."""
     return get_district_activity(minutes=minutes)
+
+
+@app.get("/stats/districts/map.svg")
+@app.get("/stats/districts/map.png")
+@app.get("/stats/districts/map")
+async def district_activity_map(
+    request: Request,
+    minutes: int = Query(60, ge=5, le=1440),
+    agency: str | None = Query(
+        None,
+        max_length=64,
+        description="Optional agency id (e.g. denver, aurora). Default: all agencies.",
+    ),
+    width: int = Query(840, ge=240, le=2400),
+    height: int = Query(520, ge=160, le=1800),
+    format: str | None = Query(
+        None,
+        pattern="^(svg|png)$",
+        description="Override format when using /stats/districts/map",
+    ),
+) -> Response:
+    """Snapshot of the district activity choropleth (SVG or PNG).
+
+    Same colors/intensity as the dashboard map. Useful for embeds, Slack, or
+    attaching a visual to a CORA packet.
+    """
+    path = request.url.path.lower()
+    fmt = (format or "").lower()
+    if path.endswith(".png") or fmt == "png":
+        payload = render_district_map_png(
+            minutes=minutes,
+            agency=(agency or "").strip() or None,
+            width=width,
+            height=height,
+        )
+        return Response(
+            content=payload,
+            media_type="image/png",
+            headers={
+                "Cache-Control": "public, max-age=30",
+                "Content-Disposition": 'inline; filename="district-activity.png"',
+            },
+        )
+
+    svg = render_district_map_svg(
+        minutes=minutes,
+        agency=(agency or "").strip() or None,
+        width=width,
+        height=height,
+    )
+    return Response(
+        content=svg,
+        media_type="image/svg+xml",
+        headers={
+            "Cache-Control": "public, max-age=30",
+            "Content-Disposition": 'inline; filename="district-activity.svg"',
+        },
+    )
 
 
 def _serve_agency_geojson(agency: str) -> JSONResponse:

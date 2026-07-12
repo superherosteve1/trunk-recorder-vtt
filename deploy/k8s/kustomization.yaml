@@ -11,6 +11,6 @@ resources:
 #   kubectl apply -k deploy/k8s
 # does not include secrets by default.
 images:
-  - name: ghcr.io/billyjenkinsiii/sdr-trunk-vtt
-    newName: ghcr.io/billyjenkinsiii/sdr-trunk-vtt
+  - name: trunk-recorder-vtt:latest
+    newName: trunk-recorder-vtt
     newTag: latest

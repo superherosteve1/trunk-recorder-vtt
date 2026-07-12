@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import settings
-from app.database import get_db, load_talkgroups_catalog
+from app.database import get_db, load_talkgroups_catalog, since_expr
 
 _DISTRICT_NUM_RE = re.compile(
     r"\b(?:district|dist)\s*(\d+)\b|\b(?:disp|tac|district)\s*(\d+)\b",
@@ -230,7 +230,7 @@ def get_district_activity(*, minutes: int = 60) -> dict[str, Any]:
                 SELECT talkgroup, status, COUNT(*) AS count
                 FROM calls
                 WHERE talkgroup IN ({placeholders})
-                  AND created_at >= datetime('now', '-{minutes} minutes')
+                  AND created_at >= {since_expr(minutes, "minutes")}
                 GROUP BY talkgroup, status
                 """,
                 talkgroups,

@@ -5,6 +5,7 @@ metadata:
   namespace: sdr-trunk-vtt
 data:
   DATA_DIR: /data
+  DATABASE_SCHEMA: trunk-recorder-oltp
   TRANSCRIPTION_BACKEND: openai
   TRANSCRIPTION_FALLBACK: "true"
   # Same LAN Whisper host used by open-webui's Ollama path pattern

@@ -6,7 +6,8 @@ metadata:
   labels:
     app: sdr-trunk-vtt
 spec:
-  # SQLite on NFS — keep a single writer
+  # Single writer for now (SQLite fallback or Postgres cutover). Keep 1 until
+  # Postgres health is proven; claim paths use FOR UPDATE SKIP LOCKED for later.
   replicas: 1
   selector:
     matchLabels:
@@ -24,7 +25,7 @@ spec:
       containers:
         - name: vtt
           # Build/push before apply — see deploy/k8s/README.md
-          image: ghcr.io/billyjenkinsiii/sdr-trunk-vtt:latest
+          image: trunk-recorder-vtt:latest
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -44,6 +45,12 @@ spec:
                 secretKeyRef:
                   name: sdr-trunk-vtt-secrets
                   key: WHISPER_API_KEY
+                  optional: true
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: sdr-trunk-vtt-secrets
+                  key: DATABASE_URL
                   optional: true
           volumeMounts:
             - name: data
