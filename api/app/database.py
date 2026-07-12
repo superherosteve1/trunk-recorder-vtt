@@ -1,19 +1,43 @@
+"""Call persistence — SQLite by default, Postgres when DATABASE_URL is set."""
+
+from __future__ import annotations
+
 import csv
 import json
 import logging
-import sqlite3
-from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from app.alerts import transcript_has_alert
 from app.config import settings
+from app.db import (
+    get_db,
+    insert_returning_id,
+    pg_schema,
+    row_to_dict,
+    since_expr,
+    using_postgres,
+)
 
 logger = logging.getLogger(__name__)
 
-# Columns for dashboard list views — omit bulky unused fields; truncate transcripts.
-_CALL_LIST_SELECT = """
+
+def _call_list_select() -> str:
+    """Columns for dashboard list views — truncate transcripts."""
+    if using_postgres():
+        return """
+    id, created_at, updated_at, status, system_name, talkgroup, talkgroup_tag,
+    src, src_tag, freq, call_length, wav_path, metadata_json,
+    CASE
+      WHEN transcript IS NULL THEN NULL
+      WHEN length(transcript) > 240 THEN left(transcript, 240)
+      ELSE transcript
+    END AS transcript,
+    backend_used, error_message, retry_count,
+    COALESCE(has_alert, FALSE) AS has_alert
+"""
+    return """
     id, created_at, updated_at, status, system_name, talkgroup, talkgroup_tag,
     src, src_tag, freq, call_length, wav_path, metadata_json,
     CASE
@@ -30,17 +54,60 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _ensure_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> bool:
-    cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-    if column in cols:
-        return False
-    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
-    return True
+def _utc_now_param() -> Any:
+    """Value suitable for created_at/updated_at bind params."""
+    if using_postgres():
+        return datetime.now(timezone.utc)
+    return _utc_now()
+
+
+def _ts_param(value: str | None) -> Any:
+    """Bind a normalized UTC timestamp for comparisons/inserts."""
+    if value is None:
+        return None
+    if using_postgres():
+        key = _normalize_time_bound(value)
+        if not key:
+            return None
+        return datetime.fromisoformat(key).replace(tzinfo=timezone.utc)
+    return value
 
 
 def init_db() -> None:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.audio_dir.mkdir(parents=True, exist_ok=True)
+
+    if using_postgres():
+        schema = pg_schema()
+        with get_db() as conn:
+            row = conn.execute(
+                """
+                SELECT EXISTS (
+                  SELECT 1 FROM information_schema.tables
+                  WHERE table_schema = ? AND table_name = 'calls'
+                ) AS ok
+                """,
+                (schema,),
+            ).fetchone()
+            exists = bool(row["ok"] if isinstance(row, dict) else row[0])
+            if not exists:
+                raise RuntimeError(
+                    f"Postgres DATABASE_URL is set but table {schema}.calls is missing. "
+                    "Create it with docs/postgres-schema.sql first "
+                    "(or set DATABASE_SCHEMA to the schema that owns calls)."
+                )
+            for ddl in (
+                "CREATE INDEX IF NOT EXISTS idx_calls_status ON calls (status)",
+                "CREATE INDEX IF NOT EXISTS idx_calls_created ON calls (created_at DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_calls_talkgroup ON calls (talkgroup)",
+                "CREATE INDEX IF NOT EXISTS idx_calls_talkgroup_created "
+                "ON calls (talkgroup, created_at DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_calls_has_alert_created "
+                "ON calls (has_alert, created_at DESC)",
+            ):
+                conn.execute(ddl)
+        logger.info("Postgres calls table verified (schema=%s)", schema)
+        return
 
     with get_db() as conn:
         conn.execute(
@@ -68,9 +135,19 @@ def init_db() -> None:
             )
             """
         )
-        added_alert = _ensure_column(
-            conn, "calls", "has_alert", "INTEGER NOT NULL DEFAULT 0"
-        )
+        # Lightweight SQLite column add (legacy DBs).
+        col_names: set[str] = set()
+        for r in conn.execute("PRAGMA table_info(calls)").fetchall():
+            if isinstance(r, dict):
+                col_names.add(str(r["name"]))
+            else:
+                col_names.add(str(r[1]))
+        added_alert = False
+        if "has_alert" not in col_names:
+            conn.execute(
+                "ALTER TABLE calls ADD COLUMN has_alert INTEGER NOT NULL DEFAULT 0"
+            )
+            added_alert = True
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_calls_status ON calls(status)"
         )
@@ -92,7 +169,7 @@ def init_db() -> None:
             _backfill_has_alert(conn)
 
 
-def _backfill_has_alert(conn: sqlite3.Connection) -> None:
+def _backfill_has_alert(conn: Any) -> None:
     """One-time scan after adding has_alert — keeps alerts_only index-backed."""
     rows = conn.execute(
         """
@@ -102,22 +179,12 @@ def _backfill_has_alert(conn: sqlite3.Connection) -> None:
     ).fetchall()
     updated = 0
     for row in rows:
-        if transcript_has_alert(row["transcript"]):
-            conn.execute("UPDATE calls SET has_alert = 1 WHERE id = ?", (row["id"],))
+        transcript = row["transcript"] if isinstance(row, dict) else row[1]
+        row_id = row["id"] if isinstance(row, dict) else row[0]
+        if transcript_has_alert(transcript):
+            conn.execute("UPDATE calls SET has_alert = 1 WHERE id = ?", (row_id,))
             updated += 1
     logger.info("Backfilled has_alert on %s / %s transcribed calls", updated, len(rows))
-
-
-@contextmanager
-def get_db():
-    conn = sqlite3.connect(settings.db_path, timeout=30.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 30000")
-    try:
-        yield conn
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def _is_placeholder_catalog_item(item: dict[str, Any]) -> bool:
@@ -199,7 +266,10 @@ def insert_skipped_activity(
     event_time: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> int:
-    now = _format_utc_z(event_time) or _utc_now()
+    now = _utc_now_param()
+    # Prefer event_time when provided (already normalized / Zulu for SQLite).
+    if event_time:
+        now = _ts_param(_format_utc_z(event_time) or event_time) or now
     talkgroup_tag = lookup_talkgroup_tag(talkgroup)
     addressing = classify_call_addressing(talkgroup=talkgroup, src=src)
     payload = metadata or {}
@@ -215,7 +285,8 @@ def insert_skipped_activity(
         }
     )
     with get_db() as conn:
-        cursor = conn.execute(
+        return insert_returning_id(
+            conn,
             """
             INSERT INTO calls (
                 created_at, updated_at, status, system_name, talkgroup,
@@ -235,7 +306,6 @@ def insert_skipped_activity(
                 json.dumps(payload),
             ),
         )
-        return int(cursor.lastrowid)
 
 
 def insert_encrypted_activity(
@@ -286,9 +356,10 @@ def insert_call(
     json_path: Path | None,
     metadata: dict[str, Any],
 ) -> int:
-    now = _utc_now()
+    now = _utc_now_param()
     with get_db() as conn:
-        cursor = conn.execute(
+        return insert_returning_id(
+            conn,
             """
             INSERT INTO calls (
                 created_at, updated_at, status, system_name, talkgroup,
@@ -311,13 +382,12 @@ def insert_call(
                 json.dumps(metadata),
             ),
         )
-        return int(cursor.lastrowid)
 
 
 def get_call(call_id: int) -> dict[str, Any] | None:
     with get_db() as conn:
         row = conn.execute("SELECT * FROM calls WHERE id = ?", (call_id,)).fetchone()
-        return dict(row) if row else None
+        return row_to_dict(row) if row else None
 
 
 def _normalize_time_bound(value: str | None) -> str | None:
@@ -368,7 +438,7 @@ def list_calls(
     transcript_query: str | None = None,
     alerts_only: bool = False,
 ) -> list[dict[str, Any]]:
-    query = f"SELECT {_CALL_LIST_SELECT} FROM calls"
+    query = f"SELECT {_call_list_select()} FROM calls"
     params: list[Any] = []
     clauses: list[str] = []
     if status:
@@ -389,24 +459,27 @@ def list_calls(
         params.append(system_name)
     after = _normalize_time_bound(created_after)
     before = _normalize_time_bound(created_before)
-    # Compare the UTC wall-clock prefix. Stored values are UTC (`…+00:00` / `…Z`);
-    # substr(1,19) yields YYYY-MM-DDTHH:MM:SS before any offset/fractional seconds.
-    # Do NOT over-fetch "recent" rows then filter — that misses historical windows when
-    # newer traffic fills the LIMIT.
     if after:
-        clauses.append(
-            "substr(replace(replace(created_at, 'Z', ''), ' ', 'T'), 1, 19) >= ?"
-        )
-        params.append(after)
+        if using_postgres():
+            clauses.append("created_at >= ?")
+            params.append(_ts_param(after))
+        else:
+            clauses.append(
+                "substr(replace(replace(created_at, 'Z', ''), ' ', 'T'), 1, 19) >= ?"
+            )
+            params.append(after)
     if before:
-        clauses.append(
-            "substr(replace(replace(created_at, 'Z', ''), ' ', 'T'), 1, 19) <= ?"
-        )
-        params.append(before)
+        if using_postgres():
+            clauses.append("created_at <= ?")
+            params.append(_ts_param(before))
+        else:
+            clauses.append(
+                "substr(replace(replace(created_at, 'Z', ''), ' ', 'T'), 1, 19) <= ?"
+            )
+            params.append(before)
     if transcript_query:
         needle = transcript_query.strip()
         if needle:
-            # Escape LIKE wildcards so user input is matched literally.
             escaped = (
                 needle.replace("\\", "\\\\")
                 .replace("%", "\\%")
@@ -415,7 +488,10 @@ def list_calls(
             clauses.append("transcript LIKE ? ESCAPE '\\'")
             params.append(f"%{escaped}%")
     if alerts_only:
-        clauses.append("has_alert = 1")
+        if using_postgres():
+            clauses.append("has_alert IS TRUE")
+        else:
+            clauses.append("has_alert = 1")
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
     query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
@@ -423,7 +499,7 @@ def list_calls(
 
     with get_db() as conn:
         rows = conn.execute(query, params).fetchall()
-        return [dict(row) for row in rows]
+        return [row_to_dict(row) for row in rows]
 
 
 def list_talkgroup_stats(*, system_name: str | None = None) -> list[dict[str, Any]]:
@@ -444,7 +520,7 @@ def list_talkgroup_stats(*, system_name: str | None = None) -> list[dict[str, An
     """
     with get_db() as conn:
         rows = conn.execute(query, params).fetchall()
-        return [dict(row) for row in rows]
+        return [row_to_dict(row) for row in rows]
 
 
 def list_system_stats(*, active_within_minutes: int = 5) -> list[dict[str, Any]]:
@@ -479,7 +555,7 @@ def list_system_stats(*, active_within_minutes: int = 5) -> list[dict[str, Any]]
             ORDER BY last_call_at DESC
             """
         ).fetchall()
-    activity = {row["name"]: dict(row) for row in rows}
+    activity = {row["name"]: row_to_dict(row) for row in rows}
 
     systems: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -538,13 +614,14 @@ def get_top_talkgroup_activity(*, hours: int = 6, limit: int = 8) -> list[dict[s
         for item in load_talkgroups_catalog(settings.data_dir / "talk_groups.csv")
         if item.get("talkgroup") is not None
     }
+    since = since_expr(hours, "hours")
     with get_db() as conn:
         rows = conn.execute(
             f"""
             SELECT talkgroup, COUNT(*) AS count
             FROM calls
             WHERE talkgroup IS NOT NULL
-              AND created_at >= datetime('now', '-{int(hours)} hours')
+              AND created_at >= {since}
             GROUP BY talkgroup
             ORDER BY count DESC, talkgroup ASC
             LIMIT ?
@@ -568,14 +645,19 @@ def get_top_talkgroup_activity(*, hours: int = 6, limit: int = 8) -> list[dict[s
 
 
 def get_hourly_talkgroup_activity(*, hours: int = 6, talkgroup: int) -> list[dict[str, Any]]:
+    since = since_expr(hours, "hours")
+    if using_postgres():
+        bucket_expr = "to_char(date_trunc('hour', created_at AT TIME ZONE 'utc'), 'YYYY-MM-DD HH24:00')"
+    else:
+        bucket_expr = "strftime('%Y-%m-%d %H:00', created_at)"
     with get_db() as conn:
         rows = conn.execute(
             f"""
-            SELECT strftime('%Y-%m-%d %H:00', created_at) AS bucket,
+            SELECT {bucket_expr} AS bucket,
                    COUNT(*) AS count
             FROM calls
             WHERE talkgroup = ?
-              AND created_at >= datetime('now', '-{int(hours)} hours')
+              AND created_at >= {since}
             GROUP BY bucket
             ORDER BY bucket ASC
             """,
@@ -622,6 +704,8 @@ def get_encrypted_anomalies(
     }
 
     with get_db() as conn:
+        recent_since = since_expr(window_minutes, "minutes")
+        baseline_since = since_expr(baseline_days, "days")
         recent_rows = conn.execute(
             f"""
             SELECT talkgroup,
@@ -634,16 +718,48 @@ def get_encrypted_anomalies(
             FROM calls
             WHERE status = 'encrypted'
               AND talkgroup IS NOT NULL
-              AND created_at >= datetime('now', '-{window_minutes} minutes')
+              AND created_at >= {recent_since}
             GROUP BY talkgroup, system_name
-            HAVING recent_count >= ?
+            HAVING COUNT(*) >= ?
             ORDER BY recent_count DESC
             """,
             (min_recent,),
         ).fetchall()
 
-        baseline_rows = conn.execute(
-            f"""
+        if using_postgres():
+            baseline_sql = f"""
+            SELECT talkgroup,
+                   AVG(hourly_count) AS avg_hourly,
+                   COUNT(*) AS sample_days
+            FROM (
+              SELECT talkgroup,
+                     (created_at AT TIME ZONE 'utc')::date AS day,
+                     COUNT(*) AS hourly_count
+              FROM calls
+              WHERE status = 'encrypted'
+                AND talkgroup IS NOT NULL
+                AND created_at >= {baseline_since}
+                AND created_at < {recent_since}
+                AND EXTRACT(DOW FROM created_at AT TIME ZONE 'utc')
+                    = EXTRACT(DOW FROM NOW() AT TIME ZONE 'utc')
+                AND EXTRACT(HOUR FROM created_at AT TIME ZONE 'utc')
+                    = EXTRACT(HOUR FROM NOW() AT TIME ZONE 'utc')
+              GROUP BY talkgroup, day
+            ) hourly
+            GROUP BY talkgroup
+            """
+            history_sql = f"""
+            SELECT MIN(created_at) AS first_at,
+                   COUNT(*) AS encrypted_total,
+                   EXTRACT(EPOCH FROM (
+                     ({recent_since}) - MIN(created_at)
+                   )) / 60.0 AS history_minutes
+            FROM calls
+            WHERE status = 'encrypted'
+              AND created_at < {recent_since}
+            """
+        else:
+            baseline_sql = f"""
             SELECT talkgroup,
                    AVG(hourly_count) AS avg_hourly,
                    COUNT(*) AS sample_days
@@ -654,18 +770,15 @@ def get_encrypted_anomalies(
               FROM calls
               WHERE status = 'encrypted'
                 AND talkgroup IS NOT NULL
-                AND created_at >= datetime('now', '-{baseline_days} days')
-                AND created_at < datetime('now', '-{window_minutes} minutes')
+                AND created_at >= {baseline_since}
+                AND created_at < {recent_since}
                 AND strftime('%w', created_at) = strftime('%w', 'now')
                 AND strftime('%H', created_at) = strftime('%H', 'now')
               GROUP BY talkgroup, day
             )
             GROUP BY talkgroup
             """
-        ).fetchall()
-
-        history_row = conn.execute(
-            f"""
+            history_sql = f"""
             SELECT MIN(created_at) AS first_at,
                    COUNT(*) AS encrypted_total,
                    CAST(
@@ -674,12 +787,13 @@ def get_encrypted_anomalies(
                    ) AS history_minutes
             FROM calls
             WHERE status = 'encrypted'
-              AND created_at < datetime('now', '-{window_minutes} minutes')
+              AND created_at < {recent_since}
             """
-        ).fetchone()
+
+        baseline_rows = conn.execute(baseline_sql).fetchall()
+        history_row = conn.execute(history_sql).fetchone()
 
         history_minutes = float((history_row["history_minutes"] if history_row else 0) or 0)
-        # Use actual elapsed history, not the configured baseline_days span.
         windows_in_history = max(history_minutes / window_minutes, 1.0)
         fallback_rows = conn.execute(
             f"""
@@ -689,8 +803,8 @@ def get_encrypted_anomalies(
             FROM calls
             WHERE status = 'encrypted'
               AND talkgroup IS NOT NULL
-              AND created_at >= datetime('now', '-{baseline_days} days')
-              AND created_at < datetime('now', '-{window_minutes} minutes')
+              AND created_at >= {baseline_since}
+              AND created_at < {recent_since}
             GROUP BY talkgroup
             """,
             (windows_in_history,),
@@ -926,25 +1040,39 @@ def load_talkgroups_catalog(csv_path: Path) -> list[dict[str, Any]]:
 
 def claim_pending_call() -> dict[str, Any] | None:
     with get_db() as conn:
-        row = conn.execute(
-            """
-            SELECT * FROM calls
-            WHERE status = 'pending'
-               OR (status = 'failed' AND retry_count < ?)
-            ORDER BY created_at ASC
-            LIMIT 1
-            """,
-            (settings.max_retries,),
-        ).fetchone()
+        if using_postgres():
+            row = conn.execute(
+                """
+                SELECT * FROM calls
+                WHERE status = 'pending'
+                   OR (status = 'failed' AND retry_count < ?)
+                ORDER BY created_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+                """,
+                (settings.max_retries,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT * FROM calls
+                WHERE status = 'pending'
+                   OR (status = 'failed' AND retry_count < ?)
+                ORDER BY created_at ASC
+                LIMIT 1
+                """,
+                (settings.max_retries,),
+            ).fetchone()
         if not row:
             return None
 
-        now = _utc_now()
+        now = _utc_now_param()
+        call_id = row["id"]
         conn.execute(
             "UPDATE calls SET status = 'processing', updated_at = ? WHERE id = ?",
-            (now, row["id"]),
+            (now, call_id),
         )
-        return dict(row)
+        return row_to_dict(row)
 
 
 def mark_call_completed(
@@ -954,8 +1082,10 @@ def mark_call_completed(
     backend_used: str,
     wav_path: Path | str | None = None,
 ) -> None:
-    now = _utc_now()
-    has_alert = 1 if transcript_has_alert(transcript) else 0
+    now = _utc_now_param()
+    has_alert = transcript_has_alert(transcript)
+    if not using_postgres():
+        has_alert = 1 if has_alert else 0
     with get_db() as conn:
         if wav_path is not None:
             conn.execute(
@@ -989,7 +1119,7 @@ def mark_call_completed(
 
 
 def update_call_audio_path(call_id: int, *, wav_path: Path | str) -> None:
-    now = _utc_now()
+    now = _utc_now_param()
     with get_db() as conn:
         conn.execute(
             """
@@ -1003,17 +1133,33 @@ def update_call_audio_path(call_id: int, *, wav_path: Path | str) -> None:
 
 def claim_completed_wav_for_compression() -> dict[str, Any] | None:
     """Pick one completed call still stored as WAV for background compression."""
+    # Use a bound param for the LIKE pattern — a literal '%.wav' in SQL is
+    # interpreted by psycopg as a placeholder and crashes the worker.
     with get_db() as conn:
-        row = conn.execute(
-            """
-            SELECT * FROM calls
-            WHERE status = 'completed'
-              AND wav_path LIKE '%.wav'
-            ORDER BY created_at ASC
-            LIMIT 1
-            """
-        ).fetchone()
-        return dict(row) if row else None
+        if using_postgres():
+            row = conn.execute(
+                """
+                SELECT * FROM calls
+                WHERE status = 'completed'
+                  AND wav_path LIKE ?
+                ORDER BY created_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+                """,
+                ("%.wav",),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT * FROM calls
+                WHERE status = 'completed'
+                  AND wav_path LIKE ?
+                ORDER BY created_at ASC
+                LIMIT 1
+                """,
+                ("%.wav",),
+            ).fetchone()
+        return row_to_dict(row) if row else None
 
 
 def mark_call_failed(
@@ -1022,7 +1168,7 @@ def mark_call_failed(
     error_message: str,
     increment_retry: bool,
 ) -> None:
-    now = _utc_now()
+    now = _utc_now_param()
     with get_db() as conn:
         if increment_retry:
             conn.execute(
@@ -1078,7 +1224,7 @@ def get_system_outcome_stats(*, hours: int | None = None) -> dict[str, Any]:
     hours_clause = ""
     if hours is not None:
         hours = max(1, min(int(hours), 168))
-        hours_clause = f" AND created_at >= datetime('now', '-{hours} hours')"
+        hours_clause = f" AND created_at >= {since_expr(hours, 'hours')}"
 
     with get_db() as conn:
         rows = conn.execute(
@@ -1091,7 +1237,10 @@ def get_system_outcome_stats(*, hours: int | None = None) -> dict[str, Any]:
             WHERE status IN ('encrypted', 'completed', 'failed')
               {hours_clause}
             GROUP BY COALESCE(NULLIF(system_name, ''), 'Unknown')
-            ORDER BY (encrypted + transcribed + failed) DESC, system_name ASC
+            ORDER BY (SUM(CASE WHEN status = 'encrypted' THEN 1 ELSE 0 END)
+                    + SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END)
+                    + SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)) DESC,
+                     system_name ASC
             """
         ).fetchall()
 
@@ -1173,20 +1322,28 @@ def get_incident_dossier(
         statuses.append("unknown_talkgroup")
     status_placeholders = ",".join("?" for _ in statuses)
 
-    loose_after = (
-        datetime.fromisoformat(after).replace(tzinfo=timezone.utc) - timedelta(days=1)
-    ).strftime("%Y-%m-%dT%H:%M:%S")
-    loose_before = (
-        datetime.fromisoformat(before).replace(tzinfo=timezone.utc) + timedelta(days=1)
-    ).strftime("%Y-%m-%dT%H:%M:%S")
-
-    clauses = [
-        f"status IN ({status_placeholders})",
-        "substr(replace(created_at, ' ', 'T'), 1, 19) >= ?",
-        "substr(replace(created_at, ' ', 'T'), 1, 19) <= ?",
-        "talkgroup IS NOT NULL",
-    ]
-    params: list[Any] = [*statuses, loose_after, loose_before]
+    if using_postgres():
+        clauses = [
+            f"status IN ({status_placeholders})",
+            "created_at >= ?",
+            "created_at <= ?",
+            "talkgroup IS NOT NULL",
+        ]
+        params: list[Any] = [*statuses, _ts_param(after), _ts_param(before)]
+    else:
+        loose_after = (
+            datetime.fromisoformat(after).replace(tzinfo=timezone.utc) - timedelta(days=1)
+        ).strftime("%Y-%m-%dT%H:%M:%S")
+        loose_before = (
+            datetime.fromisoformat(before).replace(tzinfo=timezone.utc) + timedelta(days=1)
+        ).strftime("%Y-%m-%dT%H:%M:%S")
+        clauses = [
+            f"status IN ({status_placeholders})",
+            "substr(replace(created_at, ' ', 'T'), 1, 19) >= ?",
+            "substr(replace(created_at, ' ', 'T'), 1, 19) <= ?",
+            "talkgroup IS NOT NULL",
+        ]
+        params = [*statuses, loose_after, loose_before]
     if system_name:
         clauses.append("system_name = ?")
         params.append(system_name)
@@ -1206,11 +1363,14 @@ def get_incident_dossier(
             params,
         ).fetchall()
 
-    rows = [
-        dict(row)
-        for row in raw_rows
-        if _created_at_in_window(row["created_at"], after, before)
-    ]
+    if using_postgres():
+        rows = [row_to_dict(row) for row in raw_rows]
+    else:
+        rows = [
+            row_to_dict(row)
+            for row in raw_rows
+            if _created_at_in_window(row["created_at"], after, before)
+        ]
 
     tz_name = (settings.site_timezone or "America/Denver").strip() or "America/Denver"
 

@@ -16,6 +16,17 @@ from app.transcription import TranscriptionError, transcribe_audio
 logger = logging.getLogger(__name__)
 
 
+def _resolve_audio_path(path: Path) -> Path | None:
+    """Return an existing audio path, preferring compressed siblings."""
+    if path.is_file():
+        return path
+    for ext in (".mp3", ".ogg", ".opus", ".wav"):
+        alt = path.with_suffix(ext)
+        if alt.is_file():
+            return alt
+    return None
+
+
 class TranscriptionWorker:
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None
@@ -37,14 +48,25 @@ class TranscriptionWorker:
 
     async def _run(self) -> None:
         while not self._stop_event.is_set():
-            call = claim_pending_call()
+            try:
+                call = await asyncio.to_thread(claim_pending_call)
+            except Exception:
+                logger.exception("claim_pending_call failed; backing off")
+                await asyncio.sleep(settings.worker_poll_interval)
+                continue
             if not call:
                 # When idle, gradually compress older completed WAVs.
                 if settings.audio_compress:
                     for _ in range(5):
                         if self._stop_event.is_set():
                             break
-                        await asyncio.to_thread(self._compress_one_existing_wav)
+                        try:
+                            await asyncio.to_thread(self._compress_one_existing_wav)
+                        except Exception:
+                            logger.exception(
+                                "Background WAV compression failed; will retry later"
+                            )
+                            break
                 try:
                     await asyncio.wait_for(
                         self._stop_event.wait(),
@@ -58,26 +80,20 @@ class TranscriptionWorker:
             wav_path = Path(call["wav_path"])
             logger.info("Processing call %s (%s)", call_id, wav_path.name)
 
-            if not wav_path.exists():
-                # DB path may lag behind early WAV→MP3 compression.
-                resolved = None
-                for ext in (".mp3", ".ogg", ".opus", ".wav"):
-                    alt = wav_path.with_suffix(ext)
-                    if alt.is_file():
-                        resolved = alt
-                        break
-                if resolved is None:
-                    mark_call_failed(
-                        call_id,
-                        error_message=f"Audio file not found: {wav_path}",
-                        increment_retry=False,
-                    )
-                    logger.error(
-                        "Giving up on call %s; audio missing at %s",
-                        call_id,
-                        wav_path,
-                    )
-                    continue
+            resolved = _resolve_audio_path(wav_path)
+            if resolved is None:
+                mark_call_failed(
+                    call_id,
+                    error_message=f"Audio file not found: {wav_path}",
+                    increment_retry=False,
+                )
+                logger.error(
+                    "Giving up on call %s; audio missing at %s",
+                    call_id,
+                    wav_path,
+                )
+                continue
+            if resolved != wav_path:
                 wav_path = resolved
                 update_call_audio_path(call_id, wav_path=wav_path)
 
@@ -95,6 +111,19 @@ class TranscriptionWorker:
                             call_id,
                             play_path.name,
                         )
+                    else:
+                        # Early ingest compress may have won the race — re-resolve.
+                        again = _resolve_audio_path(wav_path)
+                        if again is None:
+                            raise FileNotFoundError(wav_path)
+                        play_path = again
+                        if play_path != wav_path:
+                            update_call_audio_path(call_id, wav_path=play_path)
+
+                # Final existence check (peer compress may have replaced WAV).
+                play_path = _resolve_audio_path(play_path) or play_path
+                if not play_path.is_file():
+                    raise FileNotFoundError(play_path)
 
                 transcript, backend_used = await transcribe_audio(play_path)
                 mark_call_completed(
@@ -110,6 +139,29 @@ class TranscriptionWorker:
                     len(transcript),
                     play_path.name,
                 )
+            except FileNotFoundError as exc:
+                # Soft retry: early compression raced and paths shifted.
+                again = _resolve_audio_path(Path(call["wav_path"]))
+                if again is not None:
+                    update_call_audio_path(call_id, wav_path=again)
+                    mark_call_failed(
+                        call_id,
+                        error_message=f"Audio path raced during compress; will retry ({again.name})",
+                        increment_retry=True,
+                    )
+                    logger.warning(
+                        "Call %s audio raced (%s); requeued with %s",
+                        call_id,
+                        exc,
+                        again.name,
+                    )
+                else:
+                    mark_call_failed(
+                        call_id,
+                        error_message=f"Audio file not found: {exc}",
+                        increment_retry=False,
+                    )
+                    logger.error("Giving up on call %s; audio missing after race", call_id)
             except TranscriptionError as exc:
                 mark_call_failed(
                     call_id,

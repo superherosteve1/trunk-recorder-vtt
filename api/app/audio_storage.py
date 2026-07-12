@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 
 from app.config import settings
@@ -34,10 +35,10 @@ def compress_call_audio(wav_path: Path) -> Path | None:
     """Convert a WAV to the configured compressed format and remove the WAV.
 
     Returns the new path on success, or None if compression is disabled/skipped.
+    Safe under concurrent callers (early ingest compress + worker): writes a
+    unique temp file, never deletes another writer's finished output on failure.
     """
     if not settings.audio_compress:
-        return None
-    if not wav_path.is_file():
         return None
     if wav_path.suffix.lower() != ".wav":
         return None
@@ -55,6 +56,26 @@ def compress_call_audio(wav_path: Path) -> Path | None:
     if out_path.resolve() == wav_path.resolve():
         return None
 
+    # Another compress (early ingest vs worker) already finished.
+    if out_path.is_file() and out_path.stat().st_size > 0:
+        try:
+            if wav_path.is_file():
+                wav_path.unlink()
+        except OSError as exc:
+            logger.warning(
+                "Compressed sibling exists for %s but could not delete WAV: %s",
+                wav_path.name,
+                exc,
+            )
+        return out_path
+
+    if not wav_path.is_file():
+        # WAV gone; prefer an existing compressed sibling over failing.
+        if out_path.is_file() and out_path.stat().st_size > 0:
+            return out_path
+        return None
+
+    tmp_path = out_path.with_name(f".{out_path.stem}.{uuid.uuid4().hex[:8]}.tmp{out_path.suffix}")
     cmd = [
         "ffmpeg",
         "-y",
@@ -74,23 +95,37 @@ def compress_call_audio(wav_path: Path) -> Path | None:
     else:  # opus in .opus container
         cmd.extend(["-codec:a", "libopus", "-b:a", bitrate])
 
-    cmd.append(str(out_path))
+    cmd.append(str(tmp_path))
 
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
     except (OSError, subprocess.CalledProcessError) as exc:
         logger.error("Failed compressing %s: %s", wav_path.name, exc)
-        if out_path.exists():
-            out_path.unlink(missing_ok=True)
+        tmp_path.unlink(missing_ok=True)
+        # Peer may have finished while we failed.
+        if out_path.is_file() and out_path.stat().st_size > 0:
+            return out_path
         return None
 
-    if not out_path.is_file() or out_path.stat().st_size <= 0:
-        out_path.unlink(missing_ok=True)
+    if not tmp_path.is_file() or tmp_path.stat().st_size <= 0:
+        tmp_path.unlink(missing_ok=True)
         logger.error("Compression produced empty file for %s", wav_path.name)
+        if out_path.is_file() and out_path.stat().st_size > 0:
+            return out_path
         return None
 
     try:
-        wav_path.unlink()
+        tmp_path.replace(out_path)
+    except OSError as exc:
+        logger.error("Failed publishing compressed %s: %s", out_path.name, exc)
+        tmp_path.unlink(missing_ok=True)
+        if out_path.is_file() and out_path.stat().st_size > 0:
+            return out_path
+        return None
+
+    try:
+        if wav_path.is_file():
+            wav_path.unlink()
     except OSError as exc:
         logger.warning("Compressed %s but could not delete WAV: %s", wav_path.name, exc)
 

@@ -23,7 +23,7 @@ Trunk Recorder ──upload.sh──▶ trunk-recorder-vtt (Docker)
            Whisper endpoint                  faster-whisper endpoint
                     └─────────────────┬─────────────────┘
                                       ▼
-                              SQLite + web dashboard
+                              SQLite or Postgres + web dashboard
 ```
 
 Keep `TRANSCRIPTION_WORKER_ENABLED=true` (default). Point `uploadScript` at `scripts/upload.sh`.
@@ -40,7 +40,7 @@ Trunk Recorder
      ▼
 upload-transcribed.sh ──▶ local Whisper
      │                         │
-     └──── MP3 + transcript ───┴──▶ POST /calls ──▶ API + SQLite + dashboard
+     └──── MP3 + transcript ───┴──▶ POST /calls ──▶ API + DB + dashboard
 ```
 
 1. On the **cloud API**, set `TRANSCRIPTION_WORKER_ENABLED=false`. Uploads without a non-empty `transcript` form field return **HTTP 400**.
@@ -64,7 +64,7 @@ Trunk Recorder ──uploadScript──▶ trunk-recorder-vtt (Docker)
                     │                                   │
                     └─────────────────┬─────────────────┘
                                       ▼
-                              SQLite + web dashboard
+                              SQLite or Postgres + web dashboard
                                       │
                          (optional) WAV → MP3 after transcription
 ```
@@ -376,6 +376,15 @@ On the dashboard: set **From** / **To**, optionally pick a system or talkgroup, 
 
 Police-district activity via talkgroup → district mapping. Includes `agencies` (id, label, geojson_url, available) and `district_id_properties` for the map UI.
 
+### `GET /stats/districts/map.svg` / `GET /stats/districts/map.png`
+
+Rendered choropleth snapshot of current district activity (same colors as the dashboard). Optional query params: `minutes` (default 60), `agency` (`denver` / `aurora`), `width`, `height`. Also available as `GET /stats/districts/map?format=png`.
+
+```bash
+curl -o districts.png 'http://localhost:8080/stats/districts/map.png?minutes=60'
+curl -o denver.svg 'http://localhost:8080/stats/districts/map.svg?agency=denver&minutes=30'
+```
+
 ### `GET /gis/{agency_id}.geojson`
 
 District polygons for a configured agency (from `districts.json` + mounted `GIS/`). Legacy URLs `/gis/{denver|aurora}-police-districts.geojson` still work.
@@ -408,6 +417,8 @@ curl -X POST http://localhost:8080/events/unknown-talkgroup \
 |----------|---------|-------------|
 | `VTT_PORT` | `8080` | Host port |
 | `API_KEY` | `change-me` | Bearer token for `/calls` (disabled when left as default) |
+| `DATABASE_URL` | *(empty)* | When set (`postgresql://…`), use Postgres for `calls`; otherwise SQLite at `{DATA_DIR}/calls.db` |
+| `DATABASE_SCHEMA` | `trunk-recorder-oltp` | Postgres schema that owns `calls` (hyphenated names OK) |
 | `TRANSCRIPTION_BACKEND` | `openai` | Primary backend: `openai` or `faster_whisper` |
 | `TRANSCRIPTION_FALLBACK` | `true` | Fall back to the other backend on error |
 | `MIN_CALL_LENGTH` | `2` | Skip calls shorter than N seconds |
@@ -428,7 +439,25 @@ curl -X POST http://localhost:8080/events/unknown-talkgroup \
 | `RECORDS_REQUEST_TITLE` | CORA audio retrieval request | Clipboard title line |
 | `RECORDS_REQUEST_CONTACT_LABEL` | `CORA` | Contact label in clipboard text |
 
-Data is persisted in the Docker volume `vtt-data` (SQLite database and archived audio/JSON files). Talkgroups CSV, `districts.json`, GIS GeoJSON, and `docs/` are bind-mounted from the repo. Project help pages are at `/help/{name}` (for example [`/help/faq-encrypted-activity`](http://localhost:8080/help/faq-encrypted-activity) and [`/help/cora-talkgroup-identification`](http://localhost:8080/help/cora-talkgroup-identification); `/faq/encrypted` is an alias for the encrypted FAQ).
+Data is persisted under `DATA_DIR` (Docker volume `vtt-data` by default): archived audio/JSON on disk, and call rows in SQLite (`calls.db`) unless `DATABASE_URL` points at Postgres. Talkgroups CSV, `districts.json`, GIS GeoJSON, and `docs/` are bind-mounted from the repo. Project help pages are at `/help/{name}` (for example [`/help/faq-encrypted-activity`](http://localhost:8080/help/faq-encrypted-activity) and [`/help/cora-talkgroup-identification`](http://localhost:8080/help/cora-talkgroup-identification); `/faq/encrypted` is an alias for the encrypted FAQ).
+
+### Postgres (optional)
+
+1. Create the database/user and run [`docs/postgres-schema.sql`](docs/postgres-schema.sql)
+   (creates schema `"trunk-recorder-oltp"` + `calls`).
+2. Migrate existing rows (IDs preserved):
+
+   ```bash
+   export DATABASE_URL='postgresql://vtt:PASSWORD@host:5432/vtt'
+   export DATABASE_SCHEMA=trunk-recorder-oltp
+   ./scripts/migrate-sqlite-to-postgres.py /path/to/calls.db
+   ```
+
+3. Set `DATABASE_URL` (and optionally `DATABASE_SCHEMA`) in `.env` / the k8s Secret
+   (`./deploy/k8s/create-secret.sh`) and restart the API.
+4. Keep a `calls.db` backup until cutover looks healthy. Audio stays on disk/NFS.
+
+See [`deploy/k8s/README.md`](deploy/k8s/README.md) for the Synology cutover checklist.
 
 ## Upload script filtering
 
