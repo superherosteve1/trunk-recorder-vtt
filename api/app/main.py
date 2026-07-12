@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 from app.alerts import transcript_alert_emojis
 from app.audio_storage import audio_media_type, compress_call_audio
 from app.config import settings
+from app.encryption_guard import reject_encrypted_upload
 from app.database import (
     classify_call_addressing,
     count_calls_by_status,
@@ -142,6 +143,7 @@ async def health() -> dict[str, Any]:
         "transcription_backend": settings.transcription_backend.value,
         "transcription_fallback": settings.transcription_fallback,
         "transcription_worker_enabled": settings.transcription_worker_enabled,
+        "reject_encrypted_uploads": settings.reject_encrypted_uploads,
         "queue": counts,
     }
 
@@ -175,6 +177,23 @@ async def ingest_call(
             "reason": f"call_length {call_length}s below minimum {settings.min_call_length}s",
         }
 
+    # Metadata gate before any audio hits disk.
+    meta_reject = reject_encrypted_upload(metadata=metadata, audio_path=None)
+    if meta_reject:
+        logger.warning(
+            "Rejected encrypted upload (metadata) system=%s talkgroup=%s reason=%s",
+            metadata.get("short_name"),
+            metadata.get("talkgroup"),
+            meta_reject,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Encrypted voice uploads are not accepted. "
+                f"Use POST /events/encrypted for metadata-only activity. ({meta_reject})"
+            ),
+        )
+
     transcript_text = (transcript or "").strip()
     if not transcript_text and not settings.transcription_worker_enabled:
         raise HTTPException(
@@ -196,6 +215,23 @@ async def ingest_call(
 
     with audio_path.open("wb") as out:
         shutil.copyfileobj(call_audio.file, out)
+
+    audio_reject = reject_encrypted_upload(metadata=metadata, audio_path=audio_path)
+    if audio_reject:
+        audio_path.unlink(missing_ok=True)
+        logger.warning(
+            "Rejected encrypted upload (audio) system=%s talkgroup=%s reason=%s",
+            metadata.get("short_name"),
+            metadata.get("talkgroup"),
+            audio_reject,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Encrypted or non-speech noise audio uploads are not accepted. "
+                f"Use POST /events/encrypted for metadata-only activity. ({audio_reject})"
+            ),
+        )
 
     json_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 

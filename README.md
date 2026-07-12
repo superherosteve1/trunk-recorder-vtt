@@ -136,7 +136,7 @@ Each system block already includes `audioArchive`, `callLog`, and `uploadScript:
 
 ### Encrypted channel activity
 
-**Important:** This stack never records or decrypts encrypted voice. Encrypted dashboard rows are metadata only (Trunk Recorder skipped the call). Recording or decrypting encrypted radio traffic you are not authorized to receive is generally a federal felony — see [docs/faq-encrypted-activity.md](docs/faq-encrypted-activity.md) for how the pipeline stays metadata-only.
+**Important:** This stack never records or decrypts encrypted voice. Encrypted dashboard rows are metadata only (Trunk Recorder skipped the call). `POST /calls` also rejects uploads whose metadata or WAV entropy looks encrypted (**HTTP 400**); use `POST /events/encrypted` for metadata-only activity. Recording or decrypting encrypted radio traffic you are not authorized to receive is generally a federal felony — see [docs/faq-encrypted-activity.md](docs/faq-encrypted-activity.md).
 
 Trunk Recorder **does not** run `uploadScript` when it skips a call — it only logs lines like `Not Recording: ENCRYPTED - src: …` or `Not Recording: TG not in Talkgroup File`. To show that activity on the dashboard (no audio, no transcription), pipe TR output through the activity relay:
 
@@ -406,6 +406,9 @@ curl -X POST http://localhost:8080/events/unknown-talkgroup \
 | `AUDIO_COMPRESS` | `true` | Recompress WAV after transcription |
 | `AUDIO_FORMAT` | `mp3` | Storage format: `mp3`, `ogg`, or `opus` |
 | `AUDIO_BITRATE` | `32k` | Compressed audio bitrate |
+| `REJECT_ENCRYPTED_UPLOADS` | `true` | Reject `POST /calls` that look encrypted (metadata and/or entropy) |
+| `REJECT_ENCRYPTED_AUDIO_ENTROPY` | `true` | WAV PCM entropy heuristic (requires reject gate on) |
+| `ENCRYPTED_AUDIO_ENTROPY_THRESHOLD` | `7.5` | Shannon entropy cutoff (max 8.0); raise if clear WAVs false-positive |
 | `SITE_TITLE` | `Denver / Aurora Trunk Monitor` | Dashboard `<h1>` / browser title |
 | `SITE_SUBTITLE` | `Trunk Recorder transcription dashboard` | Line under the title |
 | `SITE_NOTICE` | *(built-in legal/ops notice)* | Header notice (FAQ link always appended) |

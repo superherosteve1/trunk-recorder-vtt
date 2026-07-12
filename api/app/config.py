@@ -58,6 +58,15 @@ class Settings(BaseSettings):
     # When false (cloud archive API), POST /calls requires a transcript;
     # the in-process Whisper worker is not started.
     transcription_worker_enabled: bool = True
+
+    # Defense in depth: reject POST /calls that look like encrypted voice.
+    # Honest Trunk Recorder clients never upload encrypted WAVs.
+    reject_encrypted_uploads: bool = True
+    reject_encrypted_audio_entropy: bool = True
+    # Shannon entropy of PCM bytes (max 8.0). Clear speech is typically lower;
+    # encrypted/noise-like PCM trends toward random (~7.5+).
+    encrypted_audio_entropy_threshold: float = 7.5
+
     trunk_recorder_config: Path = Path("/data/trunk-recorder.json")
     gis_dir: Path = Path("/data/gis")
     docs_dir: Path = Path("/data/docs")
