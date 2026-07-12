@@ -82,6 +82,8 @@ class Settings(BaseSettings):
     site_subtitle: str = "Trunk Recorder transcription dashboard"
     site_notice: str = DEFAULT_SITE_NOTICE
     site_show_records_help: bool = True
+    # Used for dossier/local labels and interpreting naive timestamps.
+    site_timezone: str = "America/Denver"
 
     # Encrypted-call public-records clipboard helper (CORA/FOIA/etc.)
     records_request_enabled: bool = True
@@ -127,6 +129,8 @@ class Settings(BaseSettings):
             "show_records_help": bool(self.site_show_records_help)
             and bool(records["enabled"]),
             "records_request": records,
+            "timezone": (self.site_timezone or "America/Denver").strip()
+            or "America/Denver",
         }
 
 

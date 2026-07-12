@@ -6,6 +6,7 @@ import re
 import shutil
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -36,6 +37,7 @@ from app.database import (
     get_db,
     get_encrypted_anomalies,
     get_hourly_talkgroup_activity,
+    get_incident_dossier,
     get_system_outcome_stats,
     get_top_talkgroup_activity,
     init_db,
@@ -485,6 +487,66 @@ async def encrypted_anomalies(
         baseline_days=baseline_days,
         limit=limit,
     )
+
+
+@app.get("/stats/incident-dossier")
+async def incident_dossier(
+    created_after: str = Query(..., alias="from", min_length=8, max_length=40),
+    created_before: str = Query(..., alias="to", min_length=8, max_length=40),
+    system: str | None = Query(None, max_length=120),
+    talkgroup: int | None = Query(None, ge=1),
+    include_unknown_talkgroup: bool = Query(
+        False,
+        description="Also include unknown_talkgroup skip events in the dossier",
+    ),
+) -> dict[str, Any]:
+    """Aggregate encrypted metadata for a time window into a CORA/FOIA locator packet.
+
+    No audio or transcripts — only control-channel activity already stored as
+    encrypted (and optionally unknown-TG) rows.
+    """
+    # Bound the window before querying so dossiers stay readable.
+    try:
+        start = datetime.fromisoformat(created_after.replace("Z", "+00:00"))
+        end = datetime.fromisoformat(created_before.replace("Z", "+00:00"))
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        if end < start:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="from must be earlier than to",
+            )
+        if (end - start).total_seconds() > 7 * 24 * 3600:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Incident window cannot exceed 7 days",
+            )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid from/to timestamp: {exc}",
+        ) from exc
+
+    try:
+        dossier = get_incident_dossier(
+            created_after=created_after,
+            created_before=created_before,
+            system_name=system,
+            talkgroup=talkgroup,
+            include_unknown_talkgroup=include_unknown_talkgroup,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    dossier["request_text"] = _incident_dossier_request_text(dossier)
+    return dossier
 
 
 @app.get("/stats/system-outcomes")
@@ -1050,6 +1112,91 @@ def _records_request_text(call: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _incident_dossier_request_text(dossier: dict[str, Any]) -> str:
+    """Build a multi-talkgroup CORA/FOIA locator packet from aggregated metadata."""
+    cfg = settings.records_request_config()
+    window_from = dossier.get("from") or "unknown"
+    window_to = dossier.get("to") or "unknown"
+    first_seen = dossier.get("first_seen") or window_from
+    last_seen = dossier.get("last_seen") or window_to
+    system_filter = dossier.get("system") or "all monitored systems"
+    talkgroups = list(dossier.get("talkgroups") or [])
+    top_srcs = list(dossier.get("top_srcs") or [])
+
+    lines = [
+        f"{cfg['title']} — incident window locator",
+        "",
+        "Please produce agency-held audio and/or CAD/logger exports corresponding to the",
+        "following publicly observable encrypted P25 trunking activity (metadata only from",
+        "our scanner pipeline — no clear audio of encrypted traffic is available to us):",
+        "",
+        f"- Request window (UTC): {window_from} → {window_to}",
+        f"- Request window ({dossier.get('timezone') or 'local'}): "
+        f"{dossier.get('from_local') or window_from} → {dossier.get('to_local') or window_to}",
+        f"- First / last encrypted grant observed in window (UTC): {first_seen} → {last_seen}",
+        f"- First / last observed ({dossier.get('timezone') or 'local'}): "
+        f"{dossier.get('first_seen_local') or first_seen} → {dossier.get('last_seen_local') or last_seen}",
+        f"- System filter: {system_filter}",
+        f"- Encrypted grants in window: {dossier.get('grant_count', 0)}",
+        f"- Distinct talkgroups: {dossier.get('unique_talkgroups', 0)}",
+        f"- Distinct source radio IDs (RIDs): {dossier.get('unique_srcs', 0)}",
+        "",
+        "Talkgroups with elevated / observed encrypted activity (highest grant count first):",
+    ]
+
+    if not talkgroups:
+        lines.append("- (none found in this window)")
+    else:
+        for item in talkgroups[:25]:
+            tg = item.get("talkgroup")
+            tag = str(item.get("talkgroup_tag") or "").strip()
+            category = str(item.get("category") or "").strip()
+            label = str(tg)
+            if tag:
+                label = f"{label} ({tag})"
+            systems = ", ".join(str(s) for s in (item.get("systems") or []) if s) or "unknown"
+            sample = item.get("sample_srcs") or []
+            rid_bits = ", ".join(
+                f"{s.get('src')}×{s.get('grant_count')}" for s in sample[:8]
+            )
+            lines.append(
+                f"- TG {label}"
+                + (f" · category {category}" if category else "")
+                + f" · system(s) {systems}"
+                + f" · grants {item.get('grant_count', 0)}"
+                + f" · unique RIDs {item.get('unique_srcs', 0)}"
+                + f" · active {item.get('first_seen')} → {item.get('last_seen')}"
+                + (f" · sample RIDs {rid_bits}" if rid_bits else "")
+            )
+
+    lines.append("")
+    lines.append("Most active source RIDs in window (for unit identification / logger search):")
+    if not top_srcs:
+        lines.append("- (none logged — Trunk Recorder skip lines may omit src)")
+    else:
+        for item in top_srcs[:20]:
+            lines.append(
+                f"- RID {item.get('src')}: {item.get('grant_count', 0)} grants"
+                f" across {item.get('talkgroup_count', 0)} talkgroup(s)"
+                f" · {item.get('first_seen')} → {item.get('last_seen')}"
+            )
+
+    lines.extend(
+        [
+            "",
+            "Related to case/CAD / news incident #: ________________",
+            f"Requestor / {cfg['contact_label']} contact: ________________",
+            "Preferred format: WAV or vendor logger export with metadata sheet",
+            "",
+            "Notes: This packet identifies traffic from publicly receivable control-channel",
+            "signaling (time, system/site, talkgroup IDs, source radio IDs). It does not",
+            "include encrypted voice content, decryption keys, or key material. Please search",
+            "agency loggers/CAD for the listed talkgroups and RIDs within the stated window.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _audio_player(call: dict[str, Any]) -> str:
     status = call.get("status")
     if status == "encrypted":
@@ -1292,6 +1439,63 @@ async def dashboard(request: Request) -> HTMLResponse:
       font-size: 0.82rem;
       padding-bottom: 0.3rem;
     }}
+    .dossier-panel {{
+      display: none;
+      margin: 0 0 1rem;
+      padding: 0.85rem 1rem;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 0.5rem;
+    }}
+    .dossier-panel.visible {{ display: block; }}
+    .dossier-header {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.65rem 1rem;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.55rem;
+    }}
+    .dossier-header strong {{ color: #e2e8f0; font-size: 0.95rem; }}
+    .dossier-actions {{ display: flex; flex-wrap: wrap; gap: 0.45rem; }}
+    .dossier-actions button {{
+      background: #0f766e;
+      color: #ecfdf5;
+      border: 1px solid #14b8a6;
+      border-radius: 0.4rem;
+      padding: 0.4rem 0.75rem;
+      font: inherit;
+      cursor: pointer;
+    }}
+    .dossier-actions button.secondary {{
+      background: #334155;
+      border-color: #475569;
+      color: #e2e8f0;
+    }}
+    .dossier-actions button:hover {{ filter: brightness(1.08); }}
+    .dossier-actions button:disabled {{ opacity: 0.55; cursor: default; filter: none; }}
+    .dossier-summary {{
+      color: #94a3b8;
+      font-size: 0.82rem;
+      margin-bottom: 0.55rem;
+    }}
+    .dossier-summary em {{ color: #cbd5e1; font-style: normal; }}
+    .dossier-table-wrap {{ overflow-x: auto; margin-bottom: 0.45rem; }}
+    .dossier-table {{
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+    }}
+    .dossier-table th,
+    .dossier-table td {{
+      text-align: left;
+      padding: 0.28rem 0.45rem;
+      border-bottom: 1px solid #1e293b;
+      color: #cbd5e1;
+      white-space: nowrap;
+    }}
+    .dossier-table th {{ color: #94a3b8; font-weight: 600; }}
+    .dossier-note {{ color: #64748b; font-size: 0.75rem; }}
     .view-toggles {{ display: flex; flex-wrap: wrap; gap: 0.85rem 1.1rem; align-items: center; }}
     .auto-play-toggle {{ display: inline-flex; align-items: center; gap: 0.45rem; color: #cbd5e1; font-size: 0.9rem; cursor: pointer; user-select: none; }}
     .auto-play-toggle input {{ accent-color: #60a5fa; }}
@@ -1722,6 +1926,10 @@ async def dashboard(request: Request) -> HTMLResponse:
     </div>
     <div class="filter-summary" id="filter-summary"></div>
     <div class="view-toggles">
+      <label class="auto-play-toggle" title="Show only encrypted metadata rows (no transcript required)">
+        <input type="checkbox" id="encrypted-only" />
+        Encrypted only
+      </label>
       <label class="auto-play-toggle">
         <input type="checkbox" id="hide-encrypted" />
         Hide encrypted
@@ -1748,7 +1956,7 @@ async def dashboard(request: Request) -> HTMLResponse:
     </div>
     <div class="filter-block">
       <label for="transcript-q">Transcript</label>
-      <input id="transcript-q" type="search" placeholder="e.g. shots fired, 10-50…" autocomplete="off" />
+      <input id="transcript-q" type="search" placeholder="Clear-call text only (excludes encrypted)" autocomplete="off" />
     </div>
     <label class="range-toggle" title="Show keyword-alert calls across all talk groups (or the selected TG)">
       <input type="checkbox" id="alerts-only" />
@@ -1757,9 +1965,36 @@ async def dashboard(request: Request) -> HTMLResponse:
     <div class="range-actions">
       <button type="button" id="range-search-btn">Search</button>
       <button type="button" class="secondary" id="range-clear-btn">Clear</button>
+      <button type="button" id="dossier-btn" title="Build a CORA/FOIA locator packet from encrypted activity in this window">CORA dossier</button>
     </div>
-    <div class="range-hint">Uses the talk group / system filters above when set. Live updates pause while a search is active.</div>
+    <div class="range-hint">From/To are your browser’s local time (converted to UTC for search). Leave Transcript empty to include encrypted rows. CORA dossier uses site timezone <span id="site-tz-label"></span> (max 7 days).</div>
     <div class="range-active-note" id="range-active-note" hidden></div>
+  </div>
+  <div class="dossier-panel" id="dossier-panel" aria-live="polite">
+    <div class="dossier-header">
+      <strong>Incident CORA dossier</strong>
+      <div class="dossier-actions">
+        <button type="button" id="dossier-copy-btn" disabled>Copy packet</button>
+        <button type="button" class="secondary" id="dossier-close-btn">Close</button>
+      </div>
+    </div>
+    <div class="dossier-summary" id="dossier-summary"></div>
+    <div class="dossier-table-wrap">
+      <table class="dossier-table">
+        <thead>
+          <tr>
+            <th>TG</th>
+            <th>Tag</th>
+            <th>Category</th>
+            <th>Grants</th>
+            <th>RIDs</th>
+            <th>Active (local)</th>
+          </tr>
+        </thead>
+        <tbody id="dossier-tbody"></tbody>
+      </table>
+    </div>
+    <div class="dossier-note">Metadata only — no encrypted audio. Use the copied packet to target an agency records search by time, talkgroup, and radio ID.</div>
   </div>
   <div class="quick-filters" id="quick-filters"></div>
   <div class="table-scroll">
@@ -1797,6 +2032,7 @@ async def dashboard(request: Request) -> HTMLResponse:
         "title": branding["title"],
         "subtitle": branding["subtitle"],
         "show_records_help": branding["show_records_help"],
+        "timezone": branding.get("timezone") or "America/Denver",
     })};
     let callsData = [];
     let talkgroupsCatalog = [];
@@ -1813,6 +2049,7 @@ async def dashboard(request: Request) -> HTMLResponse:
     let sortDir = "desc";
     let autoPlayEnabled = true;
     let hideEncrypted = false;
+    let encryptedOnly = false;
     let hideUnknownTg = false;
     let alertsOnly = false;
     let dashboardAbort = null;
@@ -1852,6 +2089,7 @@ async def dashboard(request: Request) -> HTMLResponse:
     const systemFilters = document.getElementById("system-filters");
     const filterSummary = document.getElementById("filter-summary");
     const hideEncryptedToggle = document.getElementById("hide-encrypted");
+    const encryptedOnlyToggle = document.getElementById("encrypted-only");
     const hideUnknownTgToggle = document.getElementById("hide-unknown-tg");
     const alertsOnlyToggle = document.getElementById("alerts-only");
     const autoPlayToggle = document.getElementById("auto-play-enabled");
@@ -2281,7 +2519,8 @@ async def dashboard(request: Request) -> HTMLResponse:
         const tag = item.talkgroup_tag || `TG ${{item.talkgroup}}`;
         const reason = (item.reasons || []).join("; ");
         const ratio = item.rate_ratio != null ? `${{item.rate_ratio}}×` : "";
-        return `<button type="button" class="anomaly-item" data-tg="${{item.talkgroup}}" title="${{esc(reason)}}">
+        const windowMinutes = item.window_minutes || payload.window_minutes || 15;
+        return `<button type="button" class="anomaly-item" data-tg="${{item.talkgroup}}" data-window-minutes="${{windowMinutes}}" title="${{esc(reason)}} (click to open CORA dossier)">
           <span class="conf ${{esc(item.confidence || "low")}}">${{esc(item.confidence || "low")}}</span>
           ${{esc(tag)}} ${{esc(ratio)}}
         </button>`;
@@ -2361,25 +2600,54 @@ async def dashboard(request: Request) -> HTMLResponse:
       }}
       if (rangeFrom) params.set("from", rangeFrom);
       if (rangeTo) params.set("to", rangeTo);
-      if (transcriptQuery) params.set("q", transcriptQuery);
-      // When alerts-only is on (especially with no TG focused), ask the API for
-      // keyword-matching transcripts so encrypted/metadata rows don't crowd them out.
-      if (alertsOnly) params.set("alerts_only", "true");
+      // Encrypted rows have no transcript — never combine transcript/alert filters with
+      // encrypted-only, or the result set will be empty.
+      if (encryptedOnly) {{
+        params.set("status", "encrypted");
+      }} else {{
+        if (transcriptQuery) params.set("q", transcriptQuery);
+        if (alertsOnly) params.set("alerts_only", "true");
+      }}
       return `/calls?${{params}}`;
     }}
 
     function localInputToIso(value) {{
+      // datetime-local is browser-local wall time with no offset. Build a Date via
+      // the local constructor components so we never treat it as UTC.
       if (!value) return null;
-      const date = new Date(value);
+      const match = String(value).match(
+        /^(\d{{4}})-(\d{{2}})-(\d{{2}})T(\d{{2}}):(\d{{2}})(?::(\d{{2}}))?$/
+      );
+      if (!match) return null;
+      const date = new Date(
+        Number(match[1]),
+        Number(match[2]) - 1,
+        Number(match[3]),
+        Number(match[4]),
+        Number(match[5]),
+        Number(match[6] || 0),
+      );
       if (Number.isNaN(date.getTime())) return null;
       return date.toISOString();
     }}
 
+    function parseApiUtc(iso) {{
+      if (!iso) return null;
+      let text = String(iso).trim().replace(" ", "T");
+      // API may return naive UTC (…T12:00:00). Force UTC so browsers don't treat
+      // it as local wall time (which made 6:15pm MDT look like midnight).
+      if (/^\d{{4}}-\d{{2}}-\d{{2}}T\d{{2}}:\d{{2}}(:\d{{2}})?(\.\d+)?$/.test(text)) {{
+        text += "Z";
+      }}
+      const date = new Date(text);
+      return Number.isNaN(date.getTime()) ? null : date;
+    }}
+
     function formatRangeLabel(iso) {{
       if (!iso) return "";
-      const date = new Date(iso);
-      if (Number.isNaN(date.getTime())) return iso;
-      return date.toLocaleString();
+      const date = parseApiUtc(iso);
+      if (!date) return iso;
+      return date.toLocaleString(undefined, {{ timeZoneName: "short" }});
     }}
 
     function updateRangeUi() {{
@@ -2393,7 +2661,11 @@ async def dashboard(request: Request) -> HTMLResponse:
       const parts = [];
       if (rangeFrom) parts.push(`from ${{formatRangeLabel(rangeFrom)}}`);
       if (rangeTo) parts.push(`to ${{formatRangeLabel(rangeTo)}}`);
-      if (transcriptQuery) parts.push(`transcript “${{transcriptQuery}}”`);
+      if (encryptedOnly) {{
+        parts.push("encrypted only (transcript filter ignored)");
+      }} else if (transcriptQuery) {{
+        parts.push(`transcript “${{transcriptQuery}}”`);
+      }}
       if (selectedCategory) parts.push(`category ${{selectedCategory}}`);
       else if (selectedTalkgroup != null) parts.push(`TG ${{selectedTalkgroup}}`);
       if (selectedSystem) parts.push(selectedSystem);
@@ -2408,8 +2680,8 @@ async def dashboard(request: Request) -> HTMLResponse:
       const fromIso = localInputToIso(fromInput?.value || "");
       const toIso = localInputToIso(toInput?.value || "");
       const q = (qInput?.value || "").trim();
-      if (!fromIso && !toIso && !q) {{
-        alert("Enter a transcript search and/or choose a From/To date/time.");
+      if (!fromIso && !toIso && !q && !encryptedOnly) {{
+        alert("Enter a From/To date/time, a transcript search, or enable Encrypted only.");
         return;
       }}
       if (fromIso && toIso && fromIso > toIso) {{
@@ -2418,7 +2690,8 @@ async def dashboard(request: Request) -> HTMLResponse:
       }}
       rangeFrom = fromIso;
       rangeTo = toIso;
-      transcriptQuery = q || null;
+      // Transcript LIKE never matches encrypted rows (NULL transcript).
+      transcriptQuery = encryptedOnly ? null : (q || null);
       rangeSearchActive = true;
       updateRangeUi();
       refreshDashboard({{ force: true }});
@@ -2437,6 +2710,146 @@ async def dashboard(request: Request) -> HTMLResponse:
       if (qInput) qInput.value = "";
       updateRangeUi();
       if (refresh) refreshDashboard({{ force: true }});
+    }}
+
+    let dossierRequestText = "";
+
+    function isoToLocalInput(iso) {{
+      if (!iso) return "";
+      const date = new Date(iso);
+      if (Number.isNaN(date.getTime())) return "";
+      const pad = (n) => String(n).padStart(2, "0");
+      return (
+        `${{date.getFullYear()}}-${{pad(date.getMonth() + 1)}}-${{pad(date.getDate())}}` +
+        `T${{pad(date.getHours())}}:${{pad(date.getMinutes())}}`
+      );
+    }}
+
+    function closeDossierPanel() {{
+      const panel = document.getElementById("dossier-panel");
+      if (panel) panel.classList.remove("visible");
+      dossierRequestText = "";
+      const copyBtn = document.getElementById("dossier-copy-btn");
+      if (copyBtn) copyBtn.disabled = true;
+    }}
+
+    function renderDossier(payload) {{
+      const panel = document.getElementById("dossier-panel");
+      const summary = document.getElementById("dossier-summary");
+      const tbody = document.getElementById("dossier-tbody");
+      const copyBtn = document.getElementById("dossier-copy-btn");
+      if (!panel || !summary || !tbody || !copyBtn) return;
+
+      dossierRequestText = payload.request_text || "";
+      copyBtn.disabled = !dossierRequestText;
+
+      const systemLabel = payload.system || selectedSystem || "all systems";
+      const localWindow =
+        payload.from_local && payload.to_local
+          ? `${{esc(payload.from_local)}} → ${{esc(payload.to_local)}}`
+          : `${{esc(formatRangeLabel(payload.from))}} → ${{esc(formatRangeLabel(payload.to))}}`;
+      const observed =
+        payload.first_seen || payload.last_seen
+          ? `${{esc(payload.first_seen_local || formatRangeLabel(payload.first_seen))}} → ${{esc(payload.last_seen_local || formatRangeLabel(payload.last_seen))}}`
+          : "no grants in window";
+      summary.innerHTML =
+        `<em>${{payload.grant_count || 0}}</em> encrypted grants · ` +
+        `<em>${{payload.unique_talkgroups || 0}}</em> talkgroups · ` +
+        `<em>${{payload.unique_srcs || 0}}</em> RIDs · ` +
+        `${{esc(systemLabel)}} · ` +
+        `window ${{localWindow}}` +
+        (payload.grant_count ? ` · observed ${{observed}}` : "");
+
+      const rows = payload.talkgroups || [];
+      if (!rows.length) {{
+        tbody.innerHTML = `<tr><td colspan="6"><em>No encrypted activity in this window</em></td></tr>`;
+      }} else {{
+        tbody.innerHTML = rows.map((item) => {{
+          const tag = item.talkgroup_tag || "—";
+          const category = item.category || "—";
+          const active = item.first_seen_local && item.last_seen_local
+            ? `${{item.first_seen_local}} → ${{item.last_seen_local}}`
+            : `${{formatRangeLabel(item.first_seen)}} → ${{formatRangeLabel(item.last_seen)}}`;
+          return `<tr>
+            <td>${{esc(item.talkgroup)}}</td>
+            <td>${{esc(tag)}}</td>
+            <td>${{esc(category)}}</td>
+            <td>${{esc(item.grant_count)}}</td>
+            <td>${{esc(item.unique_srcs)}}</td>
+            <td>${{esc(active)}}</td>
+          </tr>`;
+        }}).join("");
+      }}
+      panel.classList.add("visible");
+    }}
+
+    async function loadIncidentDossier({{ fromIso, toIso, includeTalkgroup = false }} = {{}}) {{
+      const fromInput = document.getElementById("range-from");
+      const toInput = document.getElementById("range-to");
+      const from = fromIso || localInputToIso(fromInput?.value || "") || rangeFrom;
+      const to = toIso || localInputToIso(toInput?.value || "") || rangeTo;
+      if (!from || !to) {{
+        alert("Set both From and To to build a CORA dossier for that incident window.");
+        return;
+      }}
+      if (from > to) {{
+        alert("From must be earlier than To.");
+        return;
+      }}
+      const params = new URLSearchParams({{ from, to }});
+      if (selectedSystem) params.set("system", selectedSystem);
+      // Default: all talkgroups in the system/window. A selected TG filter is easy to
+      // leave on accidentally and produces a false "0 grants" for the incident.
+      if (includeTalkgroup && selectedTalkgroup != null) {{
+        params.set("talkgroup", String(selectedTalkgroup));
+      }}
+      const btn = document.getElementById("dossier-btn");
+      if (btn) btn.disabled = true;
+      try {{
+        const response = await fetch(`/stats/incident-dossier?${{params}}`);
+        if (!response.ok) {{
+          const detail = await response.json().catch(() => ({{}}));
+          throw new Error(detail.detail || `HTTP ${{response.status}}`);
+        }}
+        const payload = await response.json();
+        renderDossier(payload);
+        if (selectedTalkgroup != null && !includeTalkgroup) {{
+          const summary = document.getElementById("dossier-summary");
+          if (summary) {{
+            summary.innerHTML += ` · <span style="color:#fbbf24">TG filter ignored (incident-wide)</span>`;
+          }}
+        }}
+      }} catch (err) {{
+        console.error("Incident dossier failed", err);
+        alert(`CORA dossier failed: ${{err.message || err}}`);
+      }} finally {{
+        if (btn) btn.disabled = false;
+      }}
+    }}
+
+    async function copyDossierPacket() {{
+      if (!dossierRequestText) return;
+      try {{
+        if (navigator.clipboard && window.isSecureContext) {{
+          await navigator.clipboard.writeText(dossierRequestText);
+        }} else {{
+          const area = document.createElement("textarea");
+          area.value = dossierRequestText;
+          document.body.appendChild(area);
+          area.select();
+          document.execCommand("copy");
+          area.remove();
+        }}
+        const copyBtn = document.getElementById("dossier-copy-btn");
+        if (copyBtn) {{
+          const prev = copyBtn.textContent;
+          copyBtn.textContent = "Copied";
+          setTimeout(() => {{ copyBtn.textContent = prev; }}, 1600);
+        }}
+      }} catch (err) {{
+        console.error("Clipboard copy failed", err);
+        alert("Could not copy dossier packet.");
+      }}
     }}
 
     function compareCalls(a, b) {{
@@ -2923,6 +3336,7 @@ async def dashboard(request: Request) -> HTMLResponse:
 
     function getVisibleCalls() {{
       return callsData.filter((call) => {{
+        if (encryptedOnly) return call.status === "encrypted";
         if (hideEncrypted && call.status === "encrypted") return false;
         if (hideUnknownTg && call.status === "unknown_talkgroup") return false;
         if (alertsOnly) {{
@@ -2948,7 +3362,7 @@ async def dashboard(request: Request) -> HTMLResponse:
         }} else if (selectedTalkgroup != null) {{
           message = "No calls for this talk group yet";
         }}
-        if (callsData.length && (hideEncrypted || hideUnknownTg || alertsOnly)) {{
+        if (callsData.length && (hideEncrypted || hideUnknownTg || alertsOnly || encryptedOnly)) {{
           message = "No calls match the current filters";
         }}
         return `<tr><td class="calls-empty" colspan="13"><em>${{message}}</em></td></tr>`;
@@ -3294,10 +3708,11 @@ async def dashboard(request: Request) -> HTMLResponse:
       if (rangeSearchActive) {{
         const bits = [];
         if (rangeFrom || rangeTo) bits.push("date/time");
-        if (transcriptQuery) bits.push("transcript");
+        if (!encryptedOnly && transcriptQuery) bits.push("transcript");
         parts.push(bits.length ? bits.join(" + ") + " search" : "search");
       }}
-      if (alertsOnly) parts.push("alerts only");
+      if (encryptedOnly) parts.push("encrypted only");
+      if (alertsOnly && !encryptedOnly) parts.push("alerts only");
       const suffix = parts.length ? ` in ${{parts.join(" · ")}}` : "";
       let summary = `${{visible.length}} call${{visible.length === 1 ? "" : "s"}} shown${{suffix}}`;
       if (visible.length !== callsData.length) {{
@@ -3528,6 +3943,9 @@ async def dashboard(request: Request) -> HTMLResponse:
 
     document.getElementById("range-search-btn").addEventListener("click", applyRangeSearch);
     document.getElementById("range-clear-btn").addEventListener("click", () => clearRangeSearch());
+    document.getElementById("dossier-btn").addEventListener("click", () => loadIncidentDossier());
+    document.getElementById("dossier-copy-btn").addEventListener("click", () => copyDossierPacket());
+    document.getElementById("dossier-close-btn").addEventListener("click", () => closeDossierPanel());
     for (const id of ["range-from", "range-to", "transcript-q"]) {{
       document.getElementById(id).addEventListener("keydown", (event) => {{
         if (event.key === "Enter") {{
@@ -3541,6 +3959,18 @@ async def dashboard(request: Request) -> HTMLResponse:
       const button = event.target.closest(".anomaly-item[data-tg]");
       if (!button) return;
       selectTalkgroup(button.dataset.tg);
+      const windowMinutes = Number(button.dataset.windowMinutes || 15);
+      const to = new Date();
+      const from = new Date(to.getTime() - windowMinutes * 60 * 1000);
+      const fromInput = document.getElementById("range-from");
+      const toInput = document.getElementById("range-to");
+      if (fromInput) fromInput.value = isoToLocalInput(from.toISOString());
+      if (toInput) toInput.value = isoToLocalInput(to.toISOString());
+      loadIncidentDossier({{
+        fromIso: from.toISOString(),
+        toIso: to.toISOString(),
+        includeTalkgroup: true,
+      }});
     }});
 
     document.getElementById("district-map").addEventListener("click", (event) => {{
@@ -3685,7 +4115,27 @@ async def dashboard(request: Request) -> HTMLResponse:
 
     hideEncryptedToggle.addEventListener("change", () => {{
       hideEncrypted = hideEncryptedToggle.checked;
+      if (hideEncrypted && encryptedOnly) {{
+        encryptedOnly = false;
+        if (encryptedOnlyToggle) encryptedOnlyToggle.checked = false;
+        refreshCallsAndActivity();
+        return;
+      }}
       renderTableBody();
+    }});
+
+    encryptedOnlyToggle.addEventListener("change", () => {{
+      encryptedOnly = encryptedOnlyToggle.checked;
+      if (encryptedOnly) {{
+        hideEncrypted = false;
+        if (hideEncryptedToggle) hideEncryptedToggle.checked = false;
+        alertsOnly = false;
+        if (alertsOnlyToggle) alertsOnlyToggle.checked = false;
+        // Drop transcript query from the active search so encrypted rows can appear.
+        transcriptQuery = null;
+      }}
+      refreshCallsAndActivity();
+      updateFilterUi();
     }});
 
     hideUnknownTgToggle.addEventListener("change", () => {{
@@ -3695,6 +4145,10 @@ async def dashboard(request: Request) -> HTMLResponse:
 
     alertsOnlyToggle.addEventListener("change", () => {{
       alertsOnly = alertsOnlyToggle.checked;
+      if (alertsOnly && encryptedOnly) {{
+        encryptedOnly = false;
+        if (encryptedOnlyToggle) encryptedOnlyToggle.checked = false;
+      }}
       refreshCallsAndActivity();
     }});
 
@@ -3730,6 +4184,8 @@ async def dashboard(request: Request) -> HTMLResponse:
     selectedCategory = readCategoryFromUrl();
     selectedTalkgroup = selectedCategory ? null : readTalkgroupFromUrl();
     selectedSystem = readSystemFromUrl();
+    const tzLabel = document.getElementById("site-tz-label");
+    if (tzLabel) tzLabel.textContent = siteBranding.timezone || "America/Denver";
     updateSortIndicators();
     loadSystems().then(() => loadTalkgroups()).then(refreshDashboard);
 
