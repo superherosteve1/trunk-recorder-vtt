@@ -3,7 +3,7 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +27,7 @@ _CALL_LIST_SELECT = """
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> bool:
@@ -199,7 +199,7 @@ def insert_skipped_activity(
     event_time: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> int:
-    now = event_time or _utc_now()
+    now = _format_utc_z(event_time) or _utc_now()
     talkgroup_tag = lookup_talkgroup_tag(talkgroup)
     addressing = classify_call_addressing(talkgroup=talkgroup, src=src)
     payload = metadata or {}
@@ -321,13 +321,17 @@ def get_call(call_id: int) -> dict[str, Any] | None:
 
 
 def _normalize_time_bound(value: str | None) -> str | None:
-    """Normalize ISO-ish timestamps for lexicographic SQLite comparisons."""
+    """Normalize ISO-ish timestamps to UTC ``YYYY-MM-DDTHH:MM:SS`` for comparisons.
+
+    Aware timestamps are converted to UTC. Naive timestamps are treated as UTC
+    (clients should send ``Z`` / an offset after converting from local time).
+    """
     if value is None:
         return None
     text = str(value).strip()
     if not text:
         return None
-    text = text.replace("Z", "+00:00")
+    text = text.replace("Z", "+00:00").replace(" ", "T", 1)
     try:
         parsed = datetime.fromisoformat(text)
         if parsed.tzinfo is None:
@@ -336,6 +340,19 @@ def _normalize_time_bound(value: str | None) -> str | None:
     except ValueError:
         # Fall back to a truncated comparable prefix.
         return text[:19].replace(" ", "T")
+
+
+def _format_utc_z(value: str | None) -> str | None:
+    """Return a UTC timestamp with trailing Z for JSON/JS consumers."""
+    key = _normalize_time_bound(value)
+    return f"{key}Z" if key else None
+
+
+def _created_at_in_window(created_at: str | None, after: str, before: str) -> bool:
+    key = _normalize_time_bound(created_at)
+    if not key:
+        return False
+    return after <= key <= before
 
 
 def list_calls(
@@ -372,11 +389,19 @@ def list_calls(
         params.append(system_name)
     after = _normalize_time_bound(created_after)
     before = _normalize_time_bound(created_before)
+    # Compare the UTC wall-clock prefix. Stored values are UTC (`…+00:00` / `…Z`);
+    # substr(1,19) yields YYYY-MM-DDTHH:MM:SS before any offset/fractional seconds.
+    # Do NOT over-fetch "recent" rows then filter — that misses historical windows when
+    # newer traffic fills the LIMIT.
     if after:
-        clauses.append("substr(replace(created_at, ' ', 'T'), 1, 19) >= ?")
+        clauses.append(
+            "substr(replace(replace(created_at, 'Z', ''), ' ', 'T'), 1, 19) >= ?"
+        )
         params.append(after)
     if before:
-        clauses.append("substr(replace(created_at, ' ', 'T'), 1, 19) <= ?")
+        clauses.append(
+            "substr(replace(replace(created_at, 'Z', ''), ' ', 'T'), 1, 19) <= ?"
+        )
         params.append(before)
     if transcript_query:
         needle = transcript_query.strip()
@@ -1102,4 +1127,317 @@ def get_system_outcome_stats(*, hours: int | None = None) -> dict[str, Any]:
             **totals,
             "total": totals["encrypted"] + totals["transcribed"] + totals["failed"],
         },
+    }
+
+
+def _format_site_local(utc_key: str | None, *, tz_name: str) -> str | None:
+    """Format a UTC comparable key for display in the site timezone."""
+    if not utc_key:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+
+        dt = datetime.fromisoformat(utc_key).replace(tzinfo=timezone.utc)
+        local = dt.astimezone(ZoneInfo(tz_name))
+        return local.strftime("%Y-%m-%d %H:%M:%S %Z")
+    except Exception:
+        return utc_key
+
+
+def get_incident_dossier(
+    *,
+    created_after: str,
+    created_before: str,
+    system_name: str | None = None,
+    talkgroup: int | None = None,
+    include_unknown_talkgroup: bool = False,
+    max_talkgroups: int = 40,
+    max_srcs_per_talkgroup: int = 15,
+    max_srcs_overall: int = 40,
+) -> dict[str, Any]:
+    """Aggregate encrypted (metadata-only) activity for a CORA/FOIA locator packet.
+
+    Returns talkgroups, source RIDs, and time bounds observed in the window —
+    enough for a requester to target agency-held recordings without any voice
+    content from this stack.
+    """
+    after = _normalize_time_bound(created_after)
+    before = _normalize_time_bound(created_before)
+    if not after or not before:
+        raise ValueError("from and to are required")
+    if after > before:
+        raise ValueError("from must be earlier than to")
+
+    statuses = ["encrypted"]
+    if include_unknown_talkgroup:
+        statuses.append("unknown_talkgroup")
+    status_placeholders = ",".join("?" for _ in statuses)
+
+    loose_after = (
+        datetime.fromisoformat(after).replace(tzinfo=timezone.utc) - timedelta(days=1)
+    ).strftime("%Y-%m-%dT%H:%M:%S")
+    loose_before = (
+        datetime.fromisoformat(before).replace(tzinfo=timezone.utc) + timedelta(days=1)
+    ).strftime("%Y-%m-%dT%H:%M:%S")
+
+    clauses = [
+        f"status IN ({status_placeholders})",
+        "substr(replace(created_at, ' ', 'T'), 1, 19) >= ?",
+        "substr(replace(created_at, ' ', 'T'), 1, 19) <= ?",
+        "talkgroup IS NOT NULL",
+    ]
+    params: list[Any] = [*statuses, loose_after, loose_before]
+    if system_name:
+        clauses.append("system_name = ?")
+        params.append(system_name)
+    if talkgroup is not None:
+        clauses.append("talkgroup = ?")
+        params.append(int(talkgroup))
+
+    where = " AND ".join(clauses)
+    with get_db() as conn:
+        raw_rows = conn.execute(
+            f"""
+            SELECT id, created_at, system_name, talkgroup, talkgroup_tag, src
+            FROM calls
+            WHERE {where}
+            ORDER BY created_at ASC
+            """,
+            params,
+        ).fetchall()
+
+    rows = [
+        dict(row)
+        for row in raw_rows
+        if _created_at_in_window(row["created_at"], after, before)
+    ]
+
+    tz_name = (settings.site_timezone or "America/Denver").strip() or "America/Denver"
+
+    if not rows:
+        return {
+            "from": _format_utc_z(after),
+            "to": _format_utc_z(before),
+            "from_local": _format_site_local(after, tz_name=tz_name),
+            "to_local": _format_site_local(before, tz_name=tz_name),
+            "timezone": tz_name,
+            "system": system_name,
+            "talkgroup": talkgroup,
+            "statuses": statuses,
+            "grant_count": 0,
+            "unique_talkgroups": 0,
+            "unique_srcs": 0,
+            "unique_systems": 0,
+            "first_seen": None,
+            "last_seen": None,
+            "first_seen_local": None,
+            "last_seen_local": None,
+            "systems": [],
+            "talkgroups": [],
+            "top_srcs": [],
+        }
+
+    # Aggregate in Python so offset-aware UTC keys stay consistent.
+    tg_stats: dict[tuple[int, str], dict[str, Any]] = {}
+    src_stats: dict[int, dict[str, Any]] = {}
+    system_stats: dict[str, dict[str, Any]] = {}
+    srcs_by_tg: dict[int, dict[int, int]] = {}
+    first_seen_key = None
+    last_seen_key = None
+    first_seen_raw = None
+    last_seen_raw = None
+
+    for row in rows:
+        created_raw = row.get("created_at")
+        created_key = _normalize_time_bound(created_raw) or ""
+        if first_seen_key is None or created_key < first_seen_key:
+            first_seen_key = created_key
+            first_seen_raw = created_raw
+        if last_seen_key is None or created_key > last_seen_key:
+            last_seen_key = created_key
+            last_seen_raw = created_raw
+
+        tg = int(row["talkgroup"])
+        system = str(row.get("system_name") or "unknown")
+        tg_key = (tg, system)
+        entry = tg_stats.get(tg_key)
+        if entry is None:
+            tg_stats[tg_key] = {
+                "talkgroup": tg,
+                "talkgroup_tag": row.get("talkgroup_tag"),
+                "system_name": system,
+                "grant_count": 1,
+                "srcs": set(),
+                "first_seen": created_raw,
+                "last_seen": created_raw,
+                "first_key": created_key,
+                "last_key": created_key,
+            }
+        else:
+            entry["grant_count"] += 1
+            if created_key < entry["first_key"]:
+                entry["first_key"] = created_key
+                entry["first_seen"] = created_raw
+            if created_key > entry["last_key"]:
+                entry["last_key"] = created_key
+                entry["last_seen"] = created_raw
+
+        src = row.get("src")
+        if src is not None and int(src) > 0:
+            src_i = int(src)
+            tg_stats[tg_key]["srcs"].add(src_i)
+            srcs_by_tg.setdefault(tg, {})
+            srcs_by_tg[tg][src_i] = srcs_by_tg[tg].get(src_i, 0) + 1
+            s_entry = src_stats.get(src_i)
+            if s_entry is None:
+                src_stats[src_i] = {
+                    "src": src_i,
+                    "grant_count": 1,
+                    "talkgroups": {tg},
+                    "first_seen": created_raw,
+                    "last_seen": created_raw,
+                    "first_key": created_key,
+                    "last_key": created_key,
+                }
+            else:
+                s_entry["grant_count"] += 1
+                s_entry["talkgroups"].add(tg)
+                if created_key < s_entry["first_key"]:
+                    s_entry["first_key"] = created_key
+                    s_entry["first_seen"] = created_raw
+                if created_key > s_entry["last_key"]:
+                    s_entry["last_key"] = created_key
+                    s_entry["last_seen"] = created_raw
+
+        sys_entry = system_stats.get(system)
+        if sys_entry is None:
+            system_stats[system] = {
+                "system_name": system,
+                "grant_count": 1,
+                "talkgroups": {tg},
+                "srcs": set(),
+            }
+        else:
+            sys_entry["grant_count"] += 1
+            sys_entry["talkgroups"].add(tg)
+        if src is not None and int(src) > 0:
+            system_stats[system]["srcs"].add(int(src))
+
+    merged: dict[int, dict[str, Any]] = {}
+    for (_tg, _system), row in tg_stats.items():
+        tg = int(row["talkgroup"])
+        catalog = lookup_talkgroup_entry(tg) or {}
+        tag = row["talkgroup_tag"] or catalog.get("talkgroup_tag") or None
+        category = catalog.get("category") or None
+        system = row["system_name"]
+        sample = sorted(
+            (
+                {"src": src, "grant_count": count}
+                for src, count in srcs_by_tg.get(tg, {}).items()
+            ),
+            key=lambda item: (-int(item["grant_count"]), int(item["src"])),
+        )[: max_srcs_per_talkgroup]
+        entry = merged.get(tg)
+        if entry is None:
+            merged[tg] = {
+                "talkgroup": tg,
+                "talkgroup_tag": tag,
+                "category": category,
+                "grant_count": int(row["grant_count"]),
+                "unique_srcs": len(row["srcs"]),
+                "first_seen": _format_utc_z(row["first_seen"]),
+                "last_seen": _format_utc_z(row["last_seen"]),
+                "first_seen_local": _format_site_local(row["first_key"], tz_name=tz_name),
+                "last_seen_local": _format_site_local(row["last_key"], tz_name=tz_name),
+                "systems": [system],
+                "sample_srcs": sample,
+                "_first_key": row["first_key"],
+                "_last_key": row["last_key"],
+            }
+        else:
+            entry["grant_count"] += int(row["grant_count"])
+            entry["unique_srcs"] = max(entry["unique_srcs"], len(row["srcs"]))
+            if system not in entry["systems"]:
+                entry["systems"].append(system)
+            if row["first_key"] and (
+                not entry.get("_first_key") or row["first_key"] < entry["_first_key"]
+            ):
+                entry["_first_key"] = row["first_key"]
+                entry["first_seen"] = _format_utc_z(row["first_seen"])
+                entry["first_seen_local"] = _format_site_local(
+                    row["first_key"], tz_name=tz_name
+                )
+            if row["last_key"] and (
+                not entry.get("_last_key") or row["last_key"] > entry["_last_key"]
+            ):
+                entry["_last_key"] = row["last_key"]
+                entry["last_seen"] = _format_utc_z(row["last_seen"])
+                entry["last_seen_local"] = _format_site_local(
+                    row["last_key"], tz_name=tz_name
+                )
+            if not entry["talkgroup_tag"] and tag:
+                entry["talkgroup_tag"] = tag
+            if not entry["category"] and category:
+                entry["category"] = category
+
+    for entry in merged.values():
+        entry.pop("_first_key", None)
+        entry.pop("_last_key", None)
+
+    talkgroups = sorted(
+        merged.values(),
+        key=lambda item: (-int(item["grant_count"]), int(item["talkgroup"])),
+    )[: max(1, min(int(max_talkgroups), 100))]
+
+    top_srcs = sorted(
+        (
+            {
+                "src": item["src"],
+                "grant_count": item["grant_count"],
+                "talkgroup_count": len(item["talkgroups"]),
+                "first_seen": _format_utc_z(item["first_seen"]),
+                "last_seen": _format_utc_z(item["last_seen"]),
+                "first_seen_local": _format_site_local(item["first_key"], tz_name=tz_name),
+                "last_seen_local": _format_site_local(item["last_key"], tz_name=tz_name),
+            }
+            for item in src_stats.values()
+        ),
+        key=lambda item: (-int(item["grant_count"]), int(item["src"])),
+    )[: max(1, min(int(max_srcs_overall), 100))]
+
+    systems = sorted(
+        (
+            {
+                "system_name": name,
+                "grant_count": item["grant_count"],
+                "unique_talkgroups": len(item["talkgroups"]),
+                "unique_srcs": len(item["srcs"]),
+            }
+            for name, item in system_stats.items()
+        ),
+        key=lambda item: (-int(item["grant_count"]), str(item["system_name"])),
+    )
+
+    return {
+        "from": _format_utc_z(after),
+        "to": _format_utc_z(before),
+        "from_local": _format_site_local(after, tz_name=tz_name),
+        "to_local": _format_site_local(before, tz_name=tz_name),
+        "timezone": tz_name,
+        "system": system_name,
+        "talkgroup": talkgroup,
+        "statuses": statuses,
+        "grant_count": len(rows),
+        "unique_talkgroups": len({int(r["talkgroup"]) for r in rows}),
+        "unique_srcs": len(
+            {int(r["src"]) for r in rows if r.get("src") is not None and int(r["src"]) > 0}
+        ),
+        "unique_systems": len({str(r.get("system_name") or "unknown") for r in rows}),
+        "first_seen": _format_utc_z(first_seen_raw),
+        "last_seen": _format_utc_z(last_seen_raw),
+        "first_seen_local": _format_site_local(first_seen_key, tz_name=tz_name),
+        "last_seen_local": _format_site_local(last_seen_key, tz_name=tz_name),
+        "systems": systems,
+        "talkgroups": talkgroups,
+        "top_srcs": top_srcs,
     }

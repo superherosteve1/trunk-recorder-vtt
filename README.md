@@ -362,6 +362,16 @@ Per-system encrypted / transcribed / failed mix.
 
 Heuristic encrypted-tempo anomalies vs weekday/hour baseline.
 
+### `GET /stats/incident-dossier`
+
+Aggregate encrypted metadata for a past time window into a CORA/FOIA **locator packet** (talkgroups, grant counts, source RIDs, first/last seen). Requires `from` and `to` (ISO timestamps, max 7 days). Optional `system`, `talkgroup`, `include_unknown_talkgroup`. Response includes `request_text` ready to paste into a records request. No audio — metadata only.
+
+```bash
+curl -s 'http://localhost:8080/stats/incident-dossier?from=2026-07-11T18:00:00Z&to=2026-07-12T02:00:00Z&system=Denver'
+```
+
+On the dashboard: set **From** / **To**, optionally pick a system or talkgroup, then click **CORA dossier**. Clicking an encrypted-tempo anomaly prefills the last window and opens the dossier.
+
 ### `GET /stats/districts`
 
 Police-district activity via talkgroup → district mapping. Includes `agencies` (id, label, geojson_url, available) and `district_id_properties` for the map UI.

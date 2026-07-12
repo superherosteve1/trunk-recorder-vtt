@@ -28,6 +28,7 @@ data:
   SITE_TITLE: Denver / Aurora Trunk Monitor
   SITE_SUBTITLE: Trunk Recorder transcription dashboard
   SITE_SHOW_RECORDS_HELP: "true"
+  SITE_TIMEZONE: America/Denver
   AUDIO_COMPRESS: "true"
   AUDIO_FORMAT: mp3
   AUDIO_BITRATE: 32k

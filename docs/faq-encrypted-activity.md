@@ -103,6 +103,8 @@ Encrypted rows can offer a clipboard template for a **public-records request** t
 
 It explicitly does **not** ask for decryption keys. Keys stay under agency control. Any clear audio of encrypted traffic must come from a lawful agency process — this scanner pipeline is not capable of decryption and can only provide unencrypted control channel metadata.
 
+For a **news incident spanning many encrypted grants**, use the dashboard **CORA dossier** (or `GET /stats/incident-dossier`): set From/To for the incident window and copy one locator packet listing the busiest talkgroups and source radio IDs. That helps target a CORA/FOIA request without listening to encrypted voice.
+
 See also [CORA draft: identify unknown talkgroups](/help/cora-talkgroup-identification) for talkgroup-label requests (identity of TGs, not keys or encrypted audio).
 
 ---
