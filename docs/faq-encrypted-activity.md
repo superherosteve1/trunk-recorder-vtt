@@ -119,6 +119,19 @@ Activity charts, system-outcome bars, district heat (where mapped), and encrypte
 
 ---
 
+## Does the API also reject encrypted audio on upload?
+
+Yes — as a second line of defense. `POST /calls` will return **HTTP 400** (and not store the call) when:
+
+1. **Metadata** says the grant was encrypted (`encrypted` / `enc` / non-clear P25 `algid`, etc.), or
+2. **WAV PCM entropy** looks like noise/ciphertext (optional; default on).
+
+Honest Trunk Recorder clients never hit this path for encrypted grants — they skip recording and never run `uploadScript`. The gate exists for misconfigured or malicious feeders. Catalog Mode values like `DE` / `TE` are **not** used alone (they mean encrypt-*capable*, not that this call was encrypted).
+
+Encrypted **activity** still belongs on `POST /events/encrypted` (metadata only). Tune via `REJECT_ENCRYPTED_UPLOADS`, `REJECT_ENCRYPTED_AUDIO_ENTROPY`, and `ENCRYPTED_AUDIO_ENTROPY_THRESHOLD`.
+
+---
+
 ## Operator checklist (keep the system lawful by design)
 
 1. Run Trunk Recorder so encrypted calls are **skipped**, not force-recorded.
@@ -126,6 +139,7 @@ Activity charts, system-outcome bars, district heat (where mapped), and encrypte
 3. Never point custom tools at encrypted voice channels to dump or crack audio.
 4. Treat CORA/clipboard helpers as requests for **agency-held** records, not as a decryption workflow.
 5. Keep `talk_groups.csv` and record/skip policy intentional: only configure recording for traffic you are allowed to monitor in the clear.
+6. Leave `REJECT_ENCRYPTED_UPLOADS=true` so `POST /calls` cannot archive encrypted-looking WAVs.
 
 ---
 
@@ -134,3 +148,4 @@ Activity charts, system-outcome bars, district heat (where mapped), and encrypte
 - [CORA draft: identify unknown talkgroups](/help/cora-talkgroup-identification)
 - Relay implementation: `scripts/tr-encrypted-relay.py`
 - API: `POST /events/encrypted` (metadata only — no WAV)
+- Ingest reject gate: `api/app/encryption_guard.py`
