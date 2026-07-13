@@ -44,7 +44,8 @@ kubectl -n sdr-trunk-vtt rollout restart deploy/trunk-recorder-vtt
 kubectl -n sdr-trunk-vtt rollout status deploy/trunk-recorder-vtt
 ```
 
-### Important
+`deployment.yaml` pins `nodeSelector: kubernetes.io/hostname: k3s-node1` (NFS + local
+image load) and uses `imagePullPolicy: IfNotPresent`.
 
 1. **`kubectl apply -k deploy/k8s` must run from repo root** — not from `api/`.
 2. **Always `rollout restart` after `docker load`** — the image tag stays `:latest`, so Kubernetes will not pull a new layer until the pod is recreated.
@@ -85,9 +86,9 @@ Use `./deploy/k8s/seed-via-node.sh` (preferred from Mac).
 ```bash
 kubectl apply -f deploy/k8s/namespace.yaml
 ./deploy/k8s/create-secret.sh
-./deploy/k8s/deploy.sh          # or apply + restart manually (above)
+kubectl apply -k deploy/k8s
+kubectl -n sdr-trunk-vtt rollout status deploy/trunk-recorder-vtt
 kubectl -n sdr-trunk-vtt get svc trunk-recorder-vtt-tcp
-curl -sS http://192.168.8.204:8088/health
 ```
 
 ## 5. Point Trunk Recorder at the remote VTT

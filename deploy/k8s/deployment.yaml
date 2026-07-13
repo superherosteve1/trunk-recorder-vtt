@@ -6,7 +6,7 @@ metadata:
   labels:
     app: trunk-recorder-vtt
 spec:
-  # Postgres + FOR UPDATE SKIP LOCKED — safe to scale later; keep 1 for now.
+  # Keep replicas: 1 for now; claim paths use FOR UPDATE SKIP LOCKED when you scale.
   replicas: 1
   selector:
     matchLabels:
@@ -18,7 +18,7 @@ spec:
       labels:
         app: trunk-recorder-vtt
     spec:
-      # Image is loaded on k3s-node1; NFS client works there.
+      # Schedule on the node that has the image + working NFS client.
       nodeSelector:
         kubernetes.io/hostname: k3s-node1
       containers:
