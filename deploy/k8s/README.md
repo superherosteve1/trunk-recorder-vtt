@@ -56,8 +56,8 @@ gunzip -c /tmp/sdr-trunk-vtt.tar.gz | sudo docker load
 sudo docker images | grep sdr-trunk-vtt
 ```
 
-`deployment.yaml` already pins `nodeSelector: kubernetes.io/hostname: k3s-node1`
-and `imagePullPolicy: IfNotPresent`, so that node will use the loaded image.
+`deployment.yaml` pins `nodeSelector: kubernetes.io/hostname: k3s-node1` (NFS + local
+image load) and uses `imagePullPolicy: IfNotPresent`.
 
 ### Option B — push to GHCR
 
@@ -108,8 +108,8 @@ section (including KML → GeoJSON conversion). Omit agencies/files to hide the 
 kubectl apply -f deploy/k8s/namespace.yaml
 ./deploy/k8s/create-secret.sh
 kubectl apply -k deploy/k8s
-kubectl -n sdr-trunk-vtt rollout status deploy/sdr-trunk-vtt
-kubectl -n sdr-trunk-vtt get svc sdr-trunk-vtt-tcp
+kubectl -n sdr-trunk-vtt rollout status deploy/trunk-recorder-vtt
+kubectl -n sdr-trunk-vtt get svc trunk-recorder-vtt-tcp
 ```
 
 Note the LoadBalancer EXTERNAL-IP (same MetalLB/klipper pool as open-webui,
