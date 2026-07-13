@@ -24,6 +24,11 @@ mkdir -p "$NFS_MOUNT/audio" "$NFS_MOUNT/gis" "$NFS_MOUNT/docs"
 
 cp -f "$ROOT/config/talk_groups.csv" "$NFS_MOUNT/talk_groups.csv"
 cp -f "$ROOT/config/districts.json" "$NFS_MOUNT/districts.json"
+if [[ -f "$ROOT/config/whisper-jargon.txt" ]]; then
+  cp -f "$ROOT/config/whisper-jargon.txt" "$NFS_MOUNT/whisper-jargon.txt"
+else
+  cp -f "$ROOT/config/whisper-jargon.example.txt" "$NFS_MOUNT/whisper-jargon.txt"
+fi
 cp -f "$ROOT/config.json" "$NFS_MOUNT/trunk-recorder.json"
 cp -f "$ROOT/GIS/denver_police_districts.geojson" "$NFS_MOUNT/gis/"
 cp -f "$ROOT/GIS/aurora_police_districts.geojson" "$NFS_MOUNT/gis/"

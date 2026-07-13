@@ -27,8 +27,9 @@ async def transcribe_openai(
         "language": cfg.whisper_language,
         "response_format": "json",
     }
-    if cfg.whisper_prompt:
-        data["prompt"] = cfg.whisper_prompt
+    prompt = cfg.resolved_whisper_prompt()
+    if prompt:
+        data["prompt"] = prompt
 
     owns_client = client is None
     if client is None:
@@ -66,11 +67,17 @@ async def transcribe_faster_whisper(
         client = httpx.AsyncClient(timeout=cfg.transcription_timeout)
 
     try:
+        form: dict[str, str] = {"language": cfg.faster_whisper_language}
+        prompt = cfg.resolved_whisper_prompt()
+        if prompt:
+            form["prompt"] = prompt
+            form["initial_prompt"] = prompt
+
         with audio_path.open("rb") as audio_file:
             response = await client.post(
                 cfg.faster_whisper_api_url,
                 files={"audio": (audio_path.name, audio_file, "audio/wav")},
-                data={"language": cfg.faster_whisper_language},
+                data=form,
             )
         response.raise_for_status()
         payload = response.json()

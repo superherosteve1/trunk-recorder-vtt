@@ -21,13 +21,13 @@ _env_file="${_script_dir}/../.env"
 if [[ -f "$_env_file" ]]; then
   while IFS='=' read -r _key _val; do
     case "$_key" in
-      API_KEY|VTT_API_KEY|VTT_API_URL|MIN_CALL_LENGTH|WHISPER_API_URL|WHISPER_API_KEY|WHISPER_MODEL|WHISPER_LANGUAGE|WHISPER_PROMPT|AUDIO_BITRATE|TRANSCRIPTION_TIMEOUT|BACKEND_USED)
+      API_KEY|VTT_API_KEY|VTT_API_URL|MIN_CALL_LENGTH|WHISPER_API_URL|WHISPER_API_KEY|WHISPER_MODEL|WHISPER_LANGUAGE|WHISPER_PROMPT|WHISPER_JARGON_PATH|DATA_DIR|AUDIO_BITRATE|TRANSCRIPTION_TIMEOUT|BACKEND_USED)
         _val="${_val%\"}" ; _val="${_val#\"}"
         _val="${_val%\'}" ; _val="${_val#\'}"
         export "${_key}=${_val}"
         ;;
     esac
-  done < <(grep -E '^(API_KEY|VTT_API_KEY|VTT_API_URL|MIN_CALL_LENGTH|WHISPER_API_URL|WHISPER_API_KEY|WHISPER_MODEL|WHISPER_LANGUAGE|WHISPER_PROMPT|AUDIO_BITRATE|TRANSCRIPTION_TIMEOUT|BACKEND_USED)=' "$_env_file")
+  done < <(grep -E '^(API_KEY|VTT_API_KEY|VTT_API_URL|MIN_CALL_LENGTH|WHISPER_API_URL|WHISPER_API_KEY|WHISPER_MODEL|WHISPER_LANGUAGE|WHISPER_PROMPT|WHISPER_JARGON_PATH|DATA_DIR|AUDIO_BITRATE|TRANSCRIPTION_TIMEOUT|BACKEND_USED)=' "$_env_file")
 fi
 
 wav="$1"
@@ -50,7 +50,16 @@ VTT_API_KEY="${VTT_API_KEY:-${API_KEY:-change-me}}"
 WHISPER_API_URL="${WHISPER_API_URL:-http://127.0.0.1:9000/v1/audio/transcriptions}"
 WHISPER_MODEL="${WHISPER_MODEL:-whisper-1}"
 WHISPER_LANGUAGE="${WHISPER_LANGUAGE:-en}"
-WHISPER_PROMPT="${WHISPER_PROMPT:-Police fire EMS dispatch scanner radio. 10-4, copy, en route, responding, medic, unit, code. Calls often end with local 24-hour time like 0945, 1200, 1244, 1259, 0100, 1730 — never dollar amounts like \$12.44.}"
+WHISPER_PROMPT="${WHISPER_PROMPT:-Police fire EMS dispatch scanner radio. 10-4, copy, en route, responding, medic, unit, code.}"
+DATA_DIR="${DATA_DIR:-${_script_dir}/../config}"
+WHISPER_JARGON_PATH="${WHISPER_JARGON_PATH:-${DATA_DIR}/whisper-jargon.txt}"
+_builder="${_script_dir}/build-whisper-prompt.py"
+if command -v python3 >/dev/null 2>&1 && [[ -f "$_builder" ]]; then
+  _resolved="$(python3 "$_builder" 2>/dev/null || true)"
+  if [[ -n "$_resolved" ]]; then
+    WHISPER_PROMPT="$_resolved"
+  fi
+fi
 AUDIO_BITRATE="${AUDIO_BITRATE:-32k}"
 TRANSCRIPTION_TIMEOUT="${TRANSCRIPTION_TIMEOUT:-300}"
 BACKEND_USED="${BACKEND_USED:-local-openai-whisper}"

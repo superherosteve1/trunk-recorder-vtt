@@ -18,3 +18,4 @@ Aurora/
 RRDB/
 config/*.bak*
 config/talk_groups.csv
+config/whisper-jargon.txt

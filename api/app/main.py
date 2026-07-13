@@ -484,7 +484,7 @@ async def encrypted_anomalies(
     baseline_days: int = Query(14, ge=3, le=30),
     limit: int = Query(8, ge=1, le=25),
 ) -> dict[str, Any]:
-    """Heuristic encrypted-tempo anomalies (possible incident candidates)."""
+    """Heuristic encrypted grant tempo vs weekday/hour baseline (see /faq/encrypted)."""
     return get_encrypted_anomalies(
         window_minutes=window_minutes,
         baseline_days=baseline_days,
@@ -825,6 +825,7 @@ def _render_help_page(*, title: str, markdown: str) -> HTMLResponse:
   <title>{html.escape(title)}</title>
   <style>
     :root {{ color-scheme: dark; }}
+    html {{ font-size: 80%; }}
     body {{
       margin: 0;
       font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
@@ -1014,6 +1015,7 @@ def _enrich_calls_with_category(calls: list[dict[str, Any]]) -> list[dict[str, A
                 category = ""
         item["category"] = category
         item["category_emoji"] = _category_emoji(category)
+        item["alert_emojis"] = transcript_alert_emojis(item.get("transcript"))
 
         metadata = _parse_metadata(item)
         call_type = metadata.get("call_type")
@@ -1308,7 +1310,7 @@ def _render_call_rows(calls: list[dict[str, Any]]) -> str:
             f"""
             <tr data-call-id="{call['id']}">
               <td class="col-id" data-label="ID">{call['id']}</td>
-              <td class="col-created" data-label="Created">{html.escape(str(call.get('created_at') or ''))}</td>
+              <td class="col-created" data-label="Created" data-created-utc="{html.escape(str(call.get('created_at') or ''))}">{html.escape(str(call.get('created_at') or ''))}</td>
               <td class="col-system" data-label="System">{html.escape(str(call.get('system_name') or ''))}</td>
               <td class="col-tg" data-label="TG">{html.escape(str(call.get('talkgroup') or ''))}</td>
               <td class="col-type" data-label="Type">{_format_call_type_cell(call)}</td>
@@ -1353,6 +1355,7 @@ async def dashboard(request: Request) -> HTMLResponse:
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{site_title}</title>
   <style>
+    html {{ font-size: 80%; }}
     body {{ font-family: system-ui, sans-serif; margin: 2rem; background: #0f172a; color: #e2e8f0; }}
     .page-header {{
       display: flex;
@@ -1379,6 +1382,37 @@ async def dashboard(request: Request) -> HTMLResponse:
     .notice strong {{ color: #e2e8f0; font-weight: 600; }}
     .notice a {{ color: #93c5fd; text-decoration: underline; text-underline-offset: 2px; }}
     .notice a:hover {{ color: #bfdbfe; }}
+    .dashboard-nav {{
+      display: flex;
+      gap: 0.35rem;
+      flex-wrap: wrap;
+      align-items: center;
+      margin: -0.5rem 0 1.25rem;
+      padding-bottom: 0.75rem;
+      border-bottom: 1px solid #1e293b;
+    }}
+    .nav-item {{
+      background: transparent;
+      border: 1px solid transparent;
+      color: #94a3b8;
+      border-radius: 0.45rem;
+      padding: 0.35rem 0.75rem;
+      font: inherit;
+      font-size: 0.88rem;
+      cursor: pointer;
+      text-decoration: none;
+      line-height: 1.3;
+    }}
+    .nav-item:hover {{ color: #e2e8f0; background: #1e293b; }}
+    .nav-item.active {{
+      color: #eff6ff;
+      background: #1d4ed8;
+      border-color: #60a5fa;
+    }}
+    .nav-item.nav-search-active:not(.active) {{
+      color: #fbbf24;
+      border-color: #854d0e;
+    }}
     .toolbar {{ display: flex; gap: 1rem; align-items: flex-end; flex-wrap: wrap; margin-bottom: 1.25rem; }}
     .filter-block {{ flex: 1 1 22rem; max-width: 34rem; }}
     .filter-block label {{ display: block; color: #94a3b8; font-size: 0.8rem; margin-bottom: 0.35rem; text-transform: uppercase; letter-spacing: 0.04em; }}
@@ -1445,6 +1479,7 @@ async def dashboard(request: Request) -> HTMLResponse:
       border: 1px solid #334155;
       border-radius: 0.65rem;
     }}
+    .range-search[hidden] {{ display: none !important; }}
     .range-search .filter-block {{ flex: 0 1 auto; max-width: none; }}
     .range-search input[type="datetime-local"],
     .range-search input[type="search"] {{
@@ -1646,6 +1681,25 @@ async def dashboard(request: Request) -> HTMLResponse:
       gap: 0.35rem;
       border: 1px solid #334155;
     }}
+    .anomaly-badge-head {{
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 0.45rem;
+      flex-wrap: wrap;
+    }}
+    .anomaly-help {{
+      color: #64748b;
+      font-size: 0.65rem;
+      text-decoration: none;
+      white-space: nowrap;
+    }}
+    .anomaly-help:hover {{ color: #93c5fd; text-decoration: underline; }}
+    .anomaly-meta {{
+      color: #64748b;
+      font-size: 0.65rem;
+      line-height: 1.35;
+    }}
     .anomaly-badge.active {{ border-color: #f59e0b; background: #1c1917; }}
     .anomaly-badge.high {{ border-color: #f87171; }}
     .anomaly-badge strong {{
@@ -1691,7 +1745,7 @@ async def dashboard(request: Request) -> HTMLResponse:
     .anomaly-item .conf.low {{ color: #64748b; }}
     .activity-panel {{ flex: 2 1 22rem; min-width: min(100%, 18rem); background: #1e293b; padding: 0.75rem 1rem; border-radius: 0.5rem; }}
     .activity-panel strong {{ display: block; margin-bottom: 0.5rem; font-size: 0.85rem; color: #e2e8f0; }}
-    .activity-chart svg {{ width: 100%; height: auto; min-height: 160px; display: block; }}
+    .activity-chart svg {{ width: 100%; height: auto; min-height: 10rem; display: block; }}
     .activity-empty {{ color: #64748b; font-size: 0.85rem; padding: 1rem 0; }}
     .outcome-panel {{ flex: 1.4 1 16rem; min-width: min(100%, 14rem); background: #1e293b; padding: 0.75rem 1rem; border-radius: 0.5rem; }}
     .outcome-panel strong {{ display: block; margin-bottom: 0.5rem; font-size: 0.85rem; color: #e2e8f0; }}
@@ -1932,6 +1986,14 @@ async def dashboard(request: Request) -> HTMLResponse:
     </div>
     <p class="notice">{notice_html} <a href="/faq/encrypted">How encrypted activity is shown (FAQ)</a></p>
   </div>
+  <nav class="dashboard-nav" aria-label="Dashboard menu">
+    <button type="button" class="nav-item" id="nav-search-toggle" aria-expanded="false" aria-controls="range-search">
+      Search
+    </button>
+    <a class="nav-item" href="/docs">API docs</a>
+    <a class="nav-item" href="/faq/encrypted">Encrypted FAQ</a>
+    <a class="nav-item" href="/health">Health</a>
+  </nav>
   <div class="stats" id="stats">
     <div class="stats-label">Queue · all talk groups</div>
     <div class="stat"><strong>Pending</strong><span data-status="pending">{counts.get('pending', 0)}</span></div>
@@ -1940,9 +2002,13 @@ async def dashboard(request: Request) -> HTMLResponse:
     <div class="stat"><strong>Failed</strong><span data-status="failed">{counts.get('failed', 0)}</span></div>
     <div class="stat"><strong>Encrypted</strong><span data-status="encrypted">{counts.get('encrypted', 0)}</span></div>
     <div class="stat"><strong>Unknown TG</strong><span data-status="unknown_talkgroup">{counts.get('unknown_talkgroup', 0)}</span></div>
-    <div class="anomaly-badge" id="anomaly-badge" title="Encrypted tempo vs weekday/hour baseline">
-      <strong>Encrypted tempo</strong>
+    <div class="anomaly-badge" id="anomaly-badge" title="Encrypted grant tempo vs weekday/hour baseline — see FAQ">
+      <div class="anomaly-badge-head">
+        <strong>Encrypted tempo</strong>
+        <a class="anomaly-help" href="/faq/encrypted">How calculated?</a>
+      </div>
       <span class="anomaly-summary" id="anomaly-summary">checking…</span>
+      <div class="anomaly-meta" id="anomaly-meta"></div>
       <div class="anomaly-list" id="anomaly-list"></div>
     </div>
     <div class="activity-panel" id="activity-panel">
@@ -1992,11 +2058,11 @@ async def dashboard(request: Request) -> HTMLResponse:
         Encrypted only
       </label>
       <label class="auto-play-toggle">
-        <input type="checkbox" id="hide-encrypted" />
+        <input type="checkbox" id="hide-encrypted" checked />
         Hide encrypted
       </label>
       <label class="auto-play-toggle">
-        <input type="checkbox" id="hide-unknown-tg" />
+        <input type="checkbox" id="hide-unknown-tg" checked />
         Hide not in CSV
       </label>
       <label class="auto-play-toggle">
@@ -2006,7 +2072,7 @@ async def dashboard(request: Request) -> HTMLResponse:
     </div>
     <div class="filter-summary" id="auto-play-status"></div>
   </div>
-  <div class="range-search" id="range-search">
+  <div class="range-search" id="range-search" hidden>
     <div class="filter-block">
       <label for="range-from">From</label>
       <input id="range-from" type="datetime-local" />
@@ -2063,7 +2129,7 @@ async def dashboard(request: Request) -> HTMLResponse:
     <thead>
       <tr>
         <th class="sortable col-id" data-sort="id">ID<span class="sort-indicator"></span></th>
-        <th class="sortable sorted col-created" data-sort="created_at">Created<span class="sort-indicator"></span></th>
+        <th class="sortable sorted col-created" data-sort="created_at">Created (local)<span class="sort-indicator"></span></th>
         <th class="sortable col-system" data-sort="system_name">System<span class="sort-indicator"></span></th>
         <th class="sortable col-tg" data-sort="talkgroup">TG<span class="sort-indicator"></span></th>
         <th class="sortable col-type" data-sort="call_type">Type<span class="sort-indicator"></span></th>
@@ -2109,9 +2175,9 @@ async def dashboard(request: Request) -> HTMLResponse:
     let sortKey = "created_at";
     let sortDir = "desc";
     let autoPlayEnabled = true;
-    let hideEncrypted = false;
+    let hideEncrypted = true;
     let encryptedOnly = false;
-    let hideUnknownTg = false;
+    let hideUnknownTg = true;
     let alertsOnly = false;
     let dashboardAbort = null;
     let callsAbort = null;
@@ -2155,6 +2221,28 @@ async def dashboard(request: Request) -> HTMLResponse:
     const alertsOnlyToggle = document.getElementById("alerts-only");
     const autoPlayToggle = document.getElementById("auto-play-enabled");
     const autoPlayStatus = document.getElementById("auto-play-status");
+    const navSearchToggle = document.getElementById("nav-search-toggle");
+    const rangeSearchPanel = document.getElementById("range-search");
+    let searchPanelOpen = false;
+
+    function setSearchPanelOpen(open) {{
+      searchPanelOpen = open;
+      if (rangeSearchPanel) rangeSearchPanel.hidden = !open;
+      if (navSearchToggle) {{
+        navSearchToggle.classList.toggle("active", open);
+        navSearchToggle.setAttribute("aria-expanded", open ? "true" : "false");
+      }}
+      updateSearchNavState();
+    }}
+
+    function toggleSearchPanel() {{
+      setSearchPanelOpen(!searchPanelOpen);
+    }}
+
+    function updateSearchNavState() {{
+      if (!navSearchToggle) return;
+      navSearchToggle.classList.toggle("nav-search-active", rangeSearchActive && !searchPanelOpen);
+    }}
 
     function esc(text) {{
       const el = document.createElement("div");
@@ -2162,27 +2250,9 @@ async def dashboard(request: Request) -> HTMLResponse:
       return el.innerHTML;
     }}
 
-    function transcriptAlertEmojis(transcript) {{
-      if (!transcript) return "";
-      const rules = [
-        {{ pattern: /\\b(working fire|structure fire|building fire|house fire|garage fire|vehicle fire|car fire|brush fire|wildfire|grass fire|smoke showing|flames|fully engulfed|reported fire|confirmed fire|active fire|fire at|on fire|smoke)\\b/i, emoji: "🔥" }},
-        {{ pattern: /\\b(mental health|psychiatric|psych|5150|suicidal|suicide|behavioral|crisis)\\b/i, emoji: "🧠" }},
-        {{ pattern: /\\b(stabbing|stabbed|stab wound|knife wound)\\b/i, emoji: "🔪" }},
-        {{ pattern: /\\b(gunshot|gun shot|shots fired|shooting|shooter|gsw)\\b/i, emoji: "💥" }},
-        {{ pattern: /\\b(overdose|overdosing|overdosed|od(?:ing|ed)?|narcan|naloxone|fentanyl(?:\\s+overdose)?|heroin(?:\\s+overdose)?)\\b/i, emoji: "💉" }},
-        {{ pattern: /\\b(doa|dead on arrival|deceased|fatality|(?<!non-)fatal(?:ity)?|code black|obvious death|confirmed death|time of death|passed away|pronounced dead|body found|found deceased)\\b/i, emoji: "☠️" }},
-        {{ pattern: /\\b(trauma(?:tic)?(?:\\s+injur(?:y|ies))?|injur(?:y|ies|ed)|patient down|unconscious|cardiac arrest|chest pain|mvc|mva|motor vehicle accident|motor vehicle crash)\\b/i, emoji: "🩹" }},
-      ];
-      const seen = new Set();
-      const emojis = [];
-      for (const {{ pattern, emoji }} of rules) {{
-        if (seen.has(emoji)) continue;
-        if (pattern.test(transcript)) {{
-          seen.add(emoji);
-          emojis.push(emoji);
-        }}
-      }}
-      return emojis.join("");
+    function formatAlertsCell(call) {{
+      const emojis = call?.alert_emojis ?? "";
+      return emojis ? `<span class="alerts" title="Transcript keyword alert">${{emojis}}</span>` : "";
     }}
 
     function formatTranscriptCell(transcript, status) {{
@@ -2200,11 +2270,6 @@ async def dashboard(request: Request) -> HTMLResponse:
         return "<em>pending</em>";
       }}
       return "";
-    }}
-
-    function formatAlertsCell(transcript) {{
-      const alerts = transcriptAlertEmojis(transcript);
-      return alerts ? `<span class="alerts" title="Keyword alert">${{alerts}}</span>` : "";
     }}
 
     function updateBackendLabel(health) {{
@@ -2233,13 +2298,14 @@ async def dashboard(request: Request) -> HTMLResponse:
         const barHeight = (bucket.count / max) * (height - padY * 2);
         const x = padX + index * (barWidth + barGap);
         const y = height - padY - barHeight;
-        const label = bucket.bucket ? bucket.bucket.slice(11, 16) : "";
+        const label = formatChartBucketLabel(bucket.bucket);
+        const bucketTitle = formatDisplayTime(bucket.bucket) || bucket.bucket;
         return `
           <g>
             <rect x="${{x}}" y="${{y}}" width="${{barWidth}}" height="${{barHeight}}" rx="3" fill="#60a5fa">
-              <title>${{bucket.bucket}}: ${{bucket.count}} event${{bucket.count === 1 ? "" : "s"}}</title>
+              <title>${{esc(bucketTitle)}}: ${{bucket.count}} event${{bucket.count === 1 ? "" : "s"}}</title>
             </rect>
-            <text x="${{x + barWidth / 2}}" y="${{height - 4}}" fill="#94a3b8" font-size="10" text-anchor="middle">${{label}}</text>
+            <text x="${{x + barWidth / 2}}" y="${{height - 4}}" fill="#94a3b8" font-size="10" text-anchor="middle">${{esc(label)}}</text>
           </g>`;
       }}).join("");
       return `<svg viewBox="0 0 ${{width}} ${{height}}" preserveAspectRatio="xMidYMid meet" aria-label="Hourly talk group activity">${{bars}}</svg>`;
@@ -2544,9 +2610,34 @@ async def dashboard(request: Request) -> HTMLResponse:
       }}
     }}
 
+    function formatAnomalySystemLine(payload) {{
+      const systems = payload.recent_by_system || [];
+      if (!systems.length) {{
+        return `Last ${{payload.window_minutes || 15}}m · no encrypted grants`;
+      }}
+      const parts = systems.map((row) => `${{row.system_name}} ${{row.grant_count}}`);
+      return `Last ${{payload.window_minutes || 15}}m grants · ${{parts.join(" · ")}}`;
+    }}
+
+    function anomalyMethodologyTitle(payload) {{
+      const windowMinutes = payload.window_minutes || 15;
+      const baselineDays = payload.baseline_days || 14;
+      const minRecent = payload.min_recent || 5;
+      const rateThreshold = payload.rate_threshold || 3;
+      const cold = payload.cold_start
+        ? ` Cold-start: ${{payload.encrypted_total || 0}}/500 encrypted rows in history — scoring is conservative.`
+        : "";
+      return (
+        `Encrypted metadata grants in the last ${{windowMinutes}}m vs a ${{baselineDays}}d weekday/hour baseline. ` +
+        `Flags talkgroups with ≥${{minRecent}} grants and ≥${{rateThreshold}}× expected rate, related-TG co-activation, or many RIDs. ` +
+        `Tempo only — not voice content.${{cold}}`
+      );
+    }}
+
     function renderEncryptedAnomalies(payload) {{
       const badge = document.getElementById("anomaly-badge");
       const summary = document.getElementById("anomaly-summary");
+      const meta = document.getElementById("anomaly-meta");
       const list = document.getElementById("anomaly-list");
       if (!badge || !summary || !list || !payload) return;
 
@@ -2556,13 +2647,14 @@ async def dashboard(request: Request) -> HTMLResponse:
       const active = Boolean(payload.active) && anomalies.length > 0;
       badge.classList.toggle("active", active);
       badge.classList.toggle("high", high > 0);
+      if (meta) meta.textContent = formatAnomalySystemLine(payload);
 
       if (!active) {{
         summary.textContent = payload.cold_start ? "learning baseline" : "quiet";
         list.innerHTML = "";
         badge.title = payload.cold_start
-          ? "Encrypted history is still thin — anomaly scoring is conservative until weekday/hour baselines fill in"
-          : `No encrypted tempo anomalies in the last ${{payload.window_minutes || 15}}m`;
+          ? anomalyMethodologyTitle(payload)
+          : `${{anomalyMethodologyTitle(payload)}} No talkgroups met anomaly thresholds in this window.`;
         return;
       }}
 
@@ -2574,16 +2666,18 @@ async def dashboard(request: Request) -> HTMLResponse:
       if (medium) breakdown.push(`${{medium}} med`);
       const other = total - high - medium;
       if (other > 0) breakdown.push(`${{other}} low`);
-      badge.title = `Encrypted tempo anomalies · ${{breakdown.join(", ") || `${{total}} flagged`}} · last ${{payload.window_minutes || 15}}m vs ${{payload.baseline_days || 14}}d weekday/hour baseline${{coldNote}}`;
+      badge.title = `${{anomalyMethodologyTitle(payload)}} Flagged: ${{breakdown.join(", ") || `${{total}} talkgroups`}}${{coldNote}}`;
 
-      list.innerHTML = anomalies.slice(0, 3).map((item) => {{
+      list.innerHTML = anomalies.slice(0, 4).map((item) => {{
+        const system = item.system_name || "Unknown";
         const tag = item.talkgroup_tag || `TG ${{item.talkgroup}}`;
         const reason = (item.reasons || []).join("; ");
         const ratio = item.rate_ratio != null ? `${{item.rate_ratio}}×` : "";
         const windowMinutes = item.window_minutes || payload.window_minutes || 15;
+        const label = ratio ? `${{system}} · ${{tag}} · ${{ratio}}` : `${{system}} · ${{tag}}`;
         return `<button type="button" class="anomaly-item" data-tg="${{item.talkgroup}}" data-window-minutes="${{windowMinutes}}" title="${{esc(reason)}} (click to open CORA dossier)">
           <span class="conf ${{esc(item.confidence || "low")}}">${{esc(item.confidence || "low")}}</span>
-          ${{esc(tag)}} ${{esc(ratio)}}
+          ${{esc(label)}}
         </button>`;
       }}).join("");
     }}
@@ -2695,20 +2789,47 @@ async def dashboard(request: Request) -> HTMLResponse:
     function parseApiUtc(iso) {{
       if (!iso) return null;
       let text = String(iso).trim().replace(" ", "T");
+      // Hour buckets from the API may be "YYYY-MM-DD HH:00" (UTC, no suffix).
+      if (/^\d{{4}}-\d{{2}}-\d{{2}} \d{{2}}:\d{{2}}/.test(String(iso).trim())) {{
+        text = String(iso).trim().replace(" ", "T") + "Z";
+      }}
       // API may return naive UTC (…T12:00:00). Force UTC so browsers don't treat
       // it as local wall time (which made 6:15pm MDT look like midnight).
-      if (/^\d{{4}}-\d{{2}}-\d{{2}}T\d{{2}}:\d{{2}}(:\d{{2}})?(\.\d+)?$/.test(text)) {{
+      else if (/^\d{{4}}-\d{{2}}-\d{{2}}T\d{{2}}:\d{{2}}(:\d{{2}})?(\.\d+)?$/.test(text)) {{
         text += "Z";
       }}
       const date = new Date(text);
       return Number.isNaN(date.getTime()) ? null : date;
     }}
 
-    function formatRangeLabel(iso) {{
+    function formatDisplayTime(iso) {{
       if (!iso) return "";
       const date = parseApiUtc(iso);
-      if (!date) return iso;
+      if (!date) return String(iso);
       return date.toLocaleString(undefined, {{ timeZoneName: "short" }});
+    }}
+
+    function formatRangeLabel(iso) {{
+      return formatDisplayTime(iso);
+    }}
+
+    function formatChartBucketLabel(bucket) {{
+      if (!bucket) return "";
+      const date = parseApiUtc(bucket);
+      if (!date) {{
+        const text = String(bucket);
+        return text.includes("T") ? text.slice(11, 16) : text.slice(-5);
+      }}
+      return date.toLocaleTimeString(undefined, {{ hour: "numeric", minute: "2-digit" }});
+    }}
+
+    function formatInitialCreatedCells() {{
+      for (const cell of document.querySelectorAll("td.col-created[data-created-utc]")) {{
+        const iso = cell.dataset.createdUtc || "";
+        cell.textContent = formatDisplayTime(iso);
+        if (iso) cell.title = `UTC: ${{iso}}`;
+        cell.removeAttribute("data-created-utc");
+      }}
     }}
 
     function updateRangeUi() {{
@@ -2717,6 +2838,7 @@ async def dashboard(request: Request) -> HTMLResponse:
       if (!rangeSearchActive) {{
         note.hidden = true;
         note.textContent = "";
+        updateSearchNavState();
         return;
       }}
       const parts = [];
@@ -2732,6 +2854,7 @@ async def dashboard(request: Request) -> HTMLResponse:
       if (selectedSystem) parts.push(selectedSystem);
       note.hidden = false;
       note.textContent = `Search active · ${{parts.join(" · ")}} · live updates paused`;
+      updateSearchNavState();
     }}
 
     function applyRangeSearch() {{
@@ -2755,6 +2878,7 @@ async def dashboard(request: Request) -> HTMLResponse:
       transcriptQuery = encryptedOnly ? null : (q || null);
       rangeSearchActive = true;
       updateRangeUi();
+      setSearchPanelOpen(true);
       refreshDashboard({{ force: true }});
     }}
 
@@ -3401,9 +3525,9 @@ async def dashboard(request: Request) -> HTMLResponse:
         if (hideEncrypted && call.status === "encrypted") return false;
         if (hideUnknownTg && call.status === "unknown_talkgroup") return false;
         if (alertsOnly) {{
-          // Prefer indexed has_alert from API; fall back to client keyword scan.
+          // Prefer indexed has_alert from API; fall back to alert_emojis from API.
           if (call.has_alert != null) return Number(call.has_alert) === 1;
-          return Boolean(transcriptAlertEmojis(call.transcript || ""));
+          return Boolean(call.alert_emojis);
         }}
         return true;
       }});
@@ -3431,7 +3555,7 @@ async def dashboard(request: Request) -> HTMLResponse:
       return calls.map((call) => {{
         const transcript = call.transcript || "";
         const previewHtml = formatTranscriptCell(transcript, call.status);
-        const alertsHtml = formatAlertsCell(transcript);
+        const alertsHtml = formatAlertsCell(call);
         const tagHtml = call.talkgroup_tag ? esc(call.talkgroup_tag) : "<em>—</em>";
         const category = call.category || "";
         const categoryEmoji = call.category_emoji || "📁";
@@ -3446,9 +3570,11 @@ async def dashboard(request: Request) -> HTMLResponse:
           typeHtml = `<span class="call-type unknown" title="Addressing unknown">?</span>`;
         }}
         const playingClass = Number(call.id) === currentAutoPlayId ? " playing" : "";
+        const createdLabel = formatDisplayTime(call.created_at);
+        const createdTitle = call.created_at ? `UTC: ${{call.created_at}}` : "";
         return `<tr data-call-id="${{call.id}}" class="${{playingClass}}">
           <td class="col-id" data-label="ID">${{call.id}}</td>
-          <td class="col-created" data-label="Created">${{esc(call.created_at || "")}}</td>
+          <td class="col-created" data-label="Created"${{createdTitle ? ` title="${{esc(createdTitle)}}"` : ""}}>${{esc(createdLabel)}}</td>
           <td class="col-system" data-label="System">${{esc(call.system_name || "")}}</td>
           <td class="col-tg" data-label="TG">${{esc(String(call.talkgroup ?? ""))}}</td>
           <td class="col-type" data-label="Type">${{typeHtml}}</td>
@@ -3486,7 +3612,7 @@ async def dashboard(request: Request) -> HTMLResponse:
         }}
         const alertsEl = row.querySelector(".col-alerts");
         if (alertsEl) {{
-          alertsEl.innerHTML = formatAlertsCell(call.transcript || "");
+          alertsEl.innerHTML = formatAlertsCell(call);
         }}
         const transcriptEl = row.querySelector(".col-transcript");
         if (transcriptEl) {{
@@ -4004,6 +4130,9 @@ async def dashboard(request: Request) -> HTMLResponse:
 
     document.getElementById("range-search-btn").addEventListener("click", applyRangeSearch);
     document.getElementById("range-clear-btn").addEventListener("click", () => clearRangeSearch());
+    if (navSearchToggle) {{
+      navSearchToggle.addEventListener("click", toggleSearchPanel);
+    }}
     document.getElementById("dossier-btn").addEventListener("click", () => loadIncidentDossier());
     document.getElementById("dossier-copy-btn").addEventListener("click", () => copyDossierPacket());
     document.getElementById("dossier-close-btn").addEventListener("click", () => closeDossierPanel());
@@ -4027,6 +4156,7 @@ async def dashboard(request: Request) -> HTMLResponse:
       const toInput = document.getElementById("range-to");
       if (fromInput) fromInput.value = isoToLocalInput(from.toISOString());
       if (toInput) toInput.value = isoToLocalInput(to.toISOString());
+      setSearchPanelOpen(true);
       loadIncidentDossier({{
         fromIso: from.toISOString(),
         toIso: to.toISOString(),
@@ -4245,8 +4375,11 @@ async def dashboard(request: Request) -> HTMLResponse:
     selectedCategory = readCategoryFromUrl();
     selectedTalkgroup = selectedCategory ? null : readTalkgroupFromUrl();
     selectedSystem = readSystemFromUrl();
+    hideEncrypted = hideEncryptedToggle?.checked ?? true;
+    hideUnknownTg = hideUnknownTgToggle?.checked ?? true;
     const tzLabel = document.getElementById("site-tz-label");
     if (tzLabel) tzLabel.textContent = siteBranding.timezone || "America/Denver";
+    formatInitialCreatedCells();
     updateSortIndicators();
     loadSystems().then(() => loadTalkgroups()).then(refreshDashboard);
 

@@ -666,6 +666,45 @@ def get_hourly_talkgroup_activity(*, hours: int = 6, talkgroup: int) -> list[dic
         return [{"bucket": row["bucket"], "count": row["count"]} for row in rows]
 
 
+def _rank_encrypted_anomalies(
+    anomalies: list[dict[str, Any]], *, limit: int
+) -> list[dict[str, Any]]:
+    """Rank by score, reserving slots so each system can appear once."""
+    if not anomalies:
+        return []
+    ranked = sorted(
+        anomalies, key=lambda item: (item["score"], item["recent_count"]), reverse=True
+    )
+    picked: list[dict[str, Any]] = []
+    picked_tgs: set[int] = set()
+
+    def add(item: dict[str, Any]) -> None:
+        talkgroup = int(item["talkgroup"])
+        if talkgroup in picked_tgs or len(picked) >= limit:
+            return
+        picked.append(item)
+        picked_tgs.add(talkgroup)
+
+    head = max(1, limit - 2)
+    for item in ranked[:head]:
+        add(item)
+
+    by_system: dict[str, dict[str, Any]] = {}
+    for item in ranked:
+        system = str(item.get("system_name") or "Unknown")
+        by_system.setdefault(system, item)
+    for item in by_system.values():
+        system = str(item.get("system_name") or "Unknown")
+        if any(str(entry.get("system_name") or "Unknown") == system for entry in picked):
+            continue
+        add(item)
+
+    for item in ranked:
+        add(item)
+
+    return picked[:limit]
+
+
 def _encrypted_family_key(talkgroup: int | None, category: str | None) -> str:
     cat = (category or "").strip()
     if cat and cat.lower() != "unknown":
@@ -792,6 +831,18 @@ def get_encrypted_anomalies(
 
         baseline_rows = conn.execute(baseline_sql).fetchall()
         history_row = conn.execute(history_sql).fetchone()
+        recent_system_rows = conn.execute(
+            f"""
+            SELECT COALESCE(NULLIF(system_name, ''), 'Unknown') AS system_name,
+                   COUNT(*) AS grant_count,
+                   COUNT(DISTINCT talkgroup) AS talkgroup_count
+            FROM calls
+            WHERE status = 'encrypted'
+              AND created_at >= {recent_since}
+            GROUP BY COALESCE(NULLIF(system_name, ''), 'Unknown')
+            ORDER BY grant_count DESC, system_name ASC
+            """
+        ).fetchall()
 
         history_minutes = float((history_row["history_minutes"] if history_row else 0) or 0)
         windows_in_history = max(history_minutes / window_minutes, 1.0)
@@ -991,16 +1042,27 @@ def get_encrypted_anomalies(
             }
         )
 
-    anomalies.sort(key=lambda item: (item["score"], item["recent_count"]), reverse=True)
-    anomalies = anomalies[:limit]
+    anomalies = _rank_encrypted_anomalies(anomalies, limit=limit)
     high = sum(1 for item in anomalies if item["confidence"] == "high")
     medium = sum(1 for item in anomalies if item["confidence"] == "medium")
+    recent_by_system = [
+        {
+            "system_name": str(row["system_name"]),
+            "grant_count": int(row["grant_count"] or 0),
+            "talkgroup_count": int(row["talkgroup_count"] or 0),
+        }
+        for row in recent_system_rows
+    ]
 
     return {
         "window_minutes": window_minutes,
         "baseline_days": baseline_days,
+        "min_recent": min_recent,
+        "rate_threshold": rate_threshold,
         "generated_at": _utc_now(),
         "cold_start": cold_start,
+        "encrypted_total": encrypted_total,
+        "recent_by_system": recent_by_system,
         "anomaly_count": len(anomalies),
         "high_count": high,
         "medium_count": medium,

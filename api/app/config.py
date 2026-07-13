@@ -3,13 +3,15 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.whisper_prompt import WHISPER_PROMPT_MAX_TOKENS, build_whisper_prompt, resolve_whisper_jargon_path
+
 DEFAULT_SITE_NOTICE = (
     "No decryption of encrypted communications takes place. "
     "Encrypted calls are logged as metadata only — recording or decrypting "
     "encrypted radio you are not authorized to receive is generally a federal felony. "
     "Access to encrypted audio must be requested through the proper channels "
     "(for example, a public-records request to the responsible agency). "
-    "Non-encrypted calls are recorded and transcribed; accuracy is not 100%."
+    "Non-encrypted calls are recorded and transcribed; accuracy is not 100% nor an official transcript."
 )
 
 RECORDS_BUTTON_NOTICE = (
@@ -46,10 +48,11 @@ class Settings(BaseSettings):
     whisper_language: str = "en"
     whisper_prompt: str = (
         "Police fire EMS dispatch scanner radio. "
-        "10-4, copy, en route, responding, medic, unit, code. "
-        "Calls often end with local 24-hour time like 0945, 1200, 1244, 1259, 0100, 1730 "
-        "— never dollar amounts like $12.44."
+        "10-4, copy, en route, responding, medic, unit, code."
     )
+    # Optional path to jargon file (one term per line). Default: /data/whisper-jargon.txt
+    whisper_jargon_path: Path | None = None
+    whisper_prompt_max_tokens: int = WHISPER_PROMPT_MAX_TOKENS
 
     # faster-whisper HTTP server (POST multipart audio, JSON {"text": "..."} response)
     faster_whisper_api_url: str = "http://host.docker.internal:8000/transcribe"
@@ -105,6 +108,19 @@ class Settings(BaseSettings):
     @property
     def audio_dir(self) -> Path:
         return self.data_dir / "audio"
+
+    def resolved_whisper_jargon_path(self) -> Path:
+        return resolve_whisper_jargon_path(
+            data_dir=self.data_dir,
+            explicit=self.whisper_jargon_path,
+        )
+
+    def resolved_whisper_prompt(self) -> str:
+        return build_whisper_prompt(
+            base=self.whisper_prompt,
+            jargon_path=self.resolved_whisper_jargon_path(),
+            max_tokens=self.whisper_prompt_max_tokens,
+        )
 
     def records_request_config(self) -> dict:
         button = (self.records_request_button_label or "Records").strip() or "Records"

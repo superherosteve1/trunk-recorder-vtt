@@ -14,9 +14,8 @@ data:
   WHISPER_LANGUAGE: en
   WHISPER_PROMPT: >-
     Police fire EMS dispatch scanner radio. 10-4, copy, en route, responding,
-    medic, unit, code, battalion, ladder, squad, engine, fire dispatch, on scene,
-    emergent. Calls often end with local 24-hour time like 0945, 1200, 1244 —
-    never dollar amounts like $12.44.
+    medic, unit, code.
+  WHISPER_JARGON_PATH: /data/whisper-jargon.txt
   FASTER_WHISPER_API_URL: http://192.168.8.59:8000/transcribe
   FASTER_WHISPER_LANGUAGE: en
   MIN_CALL_LENGTH: "2"

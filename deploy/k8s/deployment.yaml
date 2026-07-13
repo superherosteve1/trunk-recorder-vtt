@@ -1,30 +1,28 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: sdr-trunk-vtt
+  name: trunk-recorder-vtt
   namespace: sdr-trunk-vtt
   labels:
-    app: sdr-trunk-vtt
+    app: trunk-recorder-vtt
 spec:
-  # Single writer for now (SQLite fallback or Postgres cutover). Keep 1 until
-  # Postgres health is proven; claim paths use FOR UPDATE SKIP LOCKED for later.
+  # Postgres + FOR UPDATE SKIP LOCKED — safe to scale later; keep 1 for now.
   replicas: 1
   selector:
     matchLabels:
-      app: sdr-trunk-vtt
+      app: trunk-recorder-vtt
   strategy:
     type: Recreate
   template:
     metadata:
       labels:
-        app: sdr-trunk-vtt
+        app: trunk-recorder-vtt
     spec:
-      # Same node preference as open-webui (optional; remove if you want any node)
+      # Image is loaded on k3s-node1; NFS client works there.
       nodeSelector:
         kubernetes.io/hostname: k3s-node1
       containers:
         - name: vtt
-          # Build/push before apply — see deploy/k8s/README.md
           image: trunk-recorder-vtt:latest
           imagePullPolicy: IfNotPresent
           ports:

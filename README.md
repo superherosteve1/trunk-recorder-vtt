@@ -304,7 +304,28 @@ Environment variables:
 | `WHISPER_API_KEY` | (empty) | Optional Bearer token |
 | `WHISPER_MODEL` | `whisper-1` | Model name sent to the API |
 | `WHISPER_LANGUAGE` | `en` | Language hint |
-| `WHISPER_PROMPT` | dispatch terms | Improves scanner jargon accuracy |
+| `WHISPER_PROMPT` | dispatch boilerplate | Short style prefix merged with jargon file |
+| `WHISPER_JARGON_PATH` | `/data/whisper-jargon.txt` | One term/phrase per line (see below) |
+| `WHISPER_PROMPT_MAX_TOKENS` | `224` | Whisper prompt token budget |
+
+#### Whisper jargon file
+
+Whisper’s `prompt` parameter nudges **spelling and style** — not instructions. OpenAI uses only the **final 224 tokens** of the prompt ([prompting guide](https://developers.openai.com/cookbook/examples/whisper_prompting_guide)).
+
+1. Copy [`config/whisper-jargon.example.txt`](config/whisper-jargon.example.txt) → `config/whisper-jargon.txt` (or edit `/data/whisper-jargon.txt` on NFS).
+2. Add local streets, agencies, unit names, and phrases you see misheard (`Navineau`, `shots fired`, `stage for PD`, …).
+3. Put **highest-priority spellings at the bottom** of the file — they survive trimming when the glossary is long.
+4. Keep `#` comments and `[section]` headers for your own organization (ignored when building the prompt).
+
+The API merges `WHISPER_PROMPT` + `Glossary: term1, term2, …` and trims from the start if over budget. Both **OpenAI-compatible** and **faster-whisper** backends receive the resolved prompt.
+
+Preview the merged prompt:
+
+```bash
+python3 scripts/build-whisper-prompt.py
+```
+
+K8s / NFS: seed scripts copy the example to `/data/whisper-jargon.txt`; set `WHISPER_JARGON_PATH=/data/whisper-jargon.txt` in the ConfigMap (default).
 
 ### faster-whisper HTTP (`TRANSCRIPTION_BACKEND=faster_whisper`)
 
@@ -318,6 +339,8 @@ Expects `POST` with multipart field `audio` and optional `language` form field. 
 |----------|---------|-------------|
 | `FASTER_WHISPER_API_URL` | — | Full URL to transcribe endpoint |
 | `FASTER_WHISPER_LANGUAGE` | `en` | Language hint |
+
+The resolved `WHISPER_JARGON_PATH` prompt is sent as `prompt` / `initial_prompt` when the server supports it.
 
 If your faster-whisper server uses a different field name or path, set `FASTER_WHISPER_API_URL` to match (e.g. `http://host:8080/v1/audio/transcriptions` and use `TRANSCRIPTION_BACKEND=openai` if it is OpenAI-compatible).
 
@@ -360,7 +383,7 @@ Per-system encrypted / transcribed / failed mix.
 
 ### `GET /stats/encrypted-anomalies`
 
-Heuristic encrypted-tempo anomalies vs weekday/hour baseline.
+Heuristic **encrypted grant tempo** vs a weekday/hour baseline (default: last **15m** vs prior **14d**). Counts `status = encrypted` metadata rows only — not voice content. Response includes `recent_by_system` (grant counts per Trunk Recorder system in the window), `encrypted_total`, and `cold_start` (history &lt;500 encrypted rows). Full algorithm: [Encrypted FAQ — encrypted tempo](/faq/encrypted).
 
 ### `GET /stats/incident-dossier`
 
