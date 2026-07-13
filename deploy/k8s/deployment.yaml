@@ -23,7 +23,6 @@ spec:
         kubernetes.io/hostname: k3s-node1
       containers:
         - name: vtt
-          # Build/push before apply — see deploy/k8s/README.md
           image: trunk-recorder-vtt:latest
           imagePullPolicy: IfNotPresent
           ports:

@@ -119,6 +119,43 @@ Those are also **not recordings**. Trunk Recorder skipped because the TG was mis
 
 Activity charts, system-outcome bars, district heat (where mapped), and encrypted-tempo anomalies all count **database events** — including encrypted metadata rows. They answer questions like “how often did encrypted grants appear on this talkgroup?” They do **not** imply that encrypted voice was captured or understood.
 
+### Encrypted tempo (dashboard badge) — full calculation
+
+**What it measures:** grant *tempo* on encrypted talkgroups — how many `status = encrypted` metadata rows arrived in a short window compared with recent history. It is **not** incident detection from voice content; it flags *possible* busy periods worth opening a CORA dossier.
+
+**Default window:** last **15 minutes** (configurable via `GET /stats/encrypted-anomalies?window_minutes=…`).
+
+**Step 1 — recent activity:** for each `(talkgroup, system_name)` pair, count encrypted grants in the window and distinct source RIDs (`src`). Ignore pairs with fewer than **5** grants in the window (`min_recent`).
+
+**Step 2 — baseline (prior 14 days, excluding the current window):**
+
+| Priority | Source | When used |
+|---|---|---|
+| 1 | **Weekday/hour** | Same talkgroup, same weekday and hour (UTC), averaged over matching days; needs **≥2 sample days** |
+| 2 | **Overall** | All encrypted grants on that talkgroup in the baseline period, scaled to the window size; needs **≥20** historical grants |
+| 3 | **Sparse** | Some history but not enough for a reliable rate |
+| 4 | **None** | New or rarely seen talkgroup |
+
+**Step 3 — signals (a talkgroup needs at least one; without a rate baseline it needs two):**
+
+1. **Rate spike** — recent count ≥ **3×** the expected count (weekday/hour or overall baseline) and ≥5 grants.
+2. **Related TGs elevated** — another talkgroup in the same **family** is also hot. Family = CSV `Category` when set (e.g. `Denver Police`, `Police`), else talkgroup band (e.g. `35000`, `39500`). Denver and Aurora police are **different families** (`Denver Police` vs `Police`).
+3. **Many RIDs** — **≥4** distinct source radio IDs keyed up in the window (≥6 during cold-start).
+4. **Rare TG surge** — little baseline history but a sudden burst (higher floors during cold-start).
+
+**Step 4 — confidence:** combined score from the signals above → `low` / `medium` / `high`. Results are sorted by score; the API returns up to 8 and reserves slots so **each Trunk Recorder system** (e.g. Denver, Aurora) can appear once when it has a qualifying hit.
+
+**Cold-start mode:** while total encrypted history in the database is **<500** rows, scoring is stricter (e.g. co-activation needs more related talkgroups; higher RID floors). The badge shows **learning baseline** until that threshold is passed.
+
+**Why Aurora may rarely appear**
+
+- **Volume:** Denver encrypted grants usually outnumber Aurora; higher-scoring Denver talkgroups fill most slots.
+- **System name:** each row uses Trunk Recorder’s `[System]` from the skip log (e.g. `[Denver]`, `[Aurora]`). Aurora must be monitored and relayed (`tr-encrypted-relay.py`) for those rows to exist.
+- **Thresholds:** Aurora district dispatch must hit ≥5 encrypted grants in 15 minutes *and* pass spike / co-activation / RID rules. Quiet periods show **quiet**, not an error.
+- **UI:** the badge lists **system · talkgroup tag · rate** (e.g. `Aurora · APD District 1 · 3.2×`) and a footnote with encrypted grant counts per system in the window.
+
+Use **Search → CORA dossier** (or `GET /stats/incident-dossier?system=Aurora&from=…&to=…`) to inspect Aurora encrypted activity even when nothing is flagged as an anomaly.
+
 ---
 
 ## Does the API also reject encrypted audio on upload?

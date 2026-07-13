@@ -1,106 +1,85 @@
 # Remote Kubernetes deploy (mirrors open-webui on this cluster)
 
 Trunk Recorder + HackRFs stay on the Mac. VTT runs in the cluster with an NFS
-volume for audio/CSV/GIS Call metadata
-can stay on SQLite at `/data/calls.db` or move to Postgres via
-`DATABASE_URL` (see Postgres cutover below).
+volume for audio/CSV/GIS. Call metadata uses Postgres when `DATABASE_URL` is set
+(see Postgres cutover below).
 
 ## Layout
-
 
 | File                  | Purpose                                                    |
 | --------------------- | ---------------------------------------------------------- |
 | `namespace.yaml`      | `sdr-trunk-vtt` namespace                                  |
 | `pv-pvc.yaml`         | Static NFS PV/PVC → `192.168.1.162:/volume1/sdr-trunk-vtt` |
 | `configmap-env.yaml`  | Non-secret env (Whisper URLs, CORA, compression)           |
-| `secret.example.yaml` | Template only — use `create-secret.sh`                     |
-| `deployment.yaml`     | Single-replica Deployment, PVC at `/data`                  |
-| `service.yaml`        | LoadBalancer on port 8080                                  |
+| `secret.example.yaml` | Template only — use `create-secret.sh`                   |
+| `deployment.yaml`     | `trunk-recorder-vtt` Deployment, PVC at `/data`            |
+| `service.yaml`        | LoadBalancer `trunk-recorder-vtt-tcp` on port **8088**     |
 | `kustomization.yaml`  | `kubectl apply -k` entrypoint                              |
+| `deploy.sh`           | **Recommended** build/load/apply/restart helper            |
 | `create-secret.sh`    | Create Secret from repo `.env`                             |
 | `seed-nfs.sh`         | Copy onto a locally mounted share (SMB OK; Mac NFS not recommended) |
-| `seed-via-node.sh`    | Seed via k3s-node1 NFS mount (preferred from Mac)                  |
+| `seed-via-node.sh`    | Seed via k3s-node1 NFS mount (preferred from Mac)          |
 
+## Quick deploy (after code changes)
 
-
-
-## 1. NAS share
-
-create shared folder:
-
-```text
-/volume1/sdr-trunk-vtt
-```
-
-Enable NFS (v4.1) for the k3s nodes, same as `/volume1/open-webui`.
-
-## 2. Get the image onto the cluster
-
-### Option A — build locally and import on `k3s-node1` (no GHCR)
-
-This cluster’s nodes are **linux/arm64** (Raspberry Pi) and use the **Docker** runtime
-(`docker://…`), not containerd — so use `docker load`, not `k3s ctr`.
-
-On the Mac (from `api/`), build for the Pi architecture:
+From the **repo root** (not `api/`):
 
 ```bash
+# Build on Mac, copy to k3s-node1, apply manifests, restart pod
+./deploy/k8s/deploy.sh --build --load
+```
+
+Or step by step:
+
+```bash
+cd api
 docker build --platform linux/arm64 -t trunk-recorder-vtt:latest .
-docker save trunk-recorder-vtt:latest | gzip > /tmp/sdr-trunk-vtt.tar.gz
-scp /tmp/sdr-trunk-vtt.tar.gz YOU@192.168.8.204:/tmp/
-```
+docker save trunk-recorder-vtt:latest | gzip > /tmp/trunk-recorder-vtt.tar.gz
+scp /tmp/trunk-recorder-vtt.tar.gz superhero@192.168.8.204:/tmp/
+ssh superhero@192.168.8.204 'gunzip -c /tmp/trunk-recorder-vtt.tar.gz | sudo docker load'
 
-On **k3s-node1** (`192.168.8.204` — where open-webui runs):
-
-```bash
-gunzip -c /tmp/sdr-trunk-vtt.tar.gz | sudo docker load
-sudo docker images | grep sdr-trunk-vtt
+cd ..   # repo root
+kubectl apply -k deploy/k8s
+kubectl -n sdr-trunk-vtt rollout restart deploy/trunk-recorder-vtt
+kubectl -n sdr-trunk-vtt rollout status deploy/trunk-recorder-vtt
 ```
 
 `deployment.yaml` pins `nodeSelector: kubernetes.io/hostname: k3s-node1` (NFS + local
 image load) and uses `imagePullPolicy: IfNotPresent`.
 
-### Option B — push to GHCR
+1. **`kubectl apply -k deploy/k8s` must run from repo root** — not from `api/`.
+2. **Always `rollout restart` after `docker load`** — the image tag stays `:latest`, so Kubernetes will not pull a new layer until the pod is recreated.
+3. **Deployment name is `trunk-recorder-vtt`** (namespace stays `sdr-trunk-vtt`). If you previously created `deploy/sdr-trunk-vtt`, delete it:
+   ```bash
+   kubectl -n sdr-trunk-vtt delete deploy/sdr-trunk-vtt svc/sdr-trunk-vtt-tcp --ignore-not-found
+   ```
+4. **LoadBalancer** is `trunk-recorder-vtt-tcp` on **8088** → `http://192.168.8.204:8088`.
 
-```bash
-cd api
-docker build -t trunk-recorder-vtt:latest .
-echo 'YOUR_GITHUB_PAT' | docker login ghcr.io -u your-user --password-stdin
-docker push trunk-recorder-vtt:latest
-```
+## 1. NAS share
 
-Then add under `deployment.spec.template.spec`:
-
-```yaml
-imagePullSecrets:
-  - name: ghcr-cred
-```
-## 3. Seed config onto NFS
-
-That packs talkgroups / GIS / docs on the Mac, SCPs to the Pi, mounts
-`your-nfs:/volume1/sdr-trunk-vtt` there, and copies files into place.
-
-
-That writes:
+Create shared folder:
 
 ```text
-/data/talk_groups.csv
-/data/districts.json
-/data/trunk-recorder.json
-/data/gis/*.geojson
-/data/docs/*.md
-/data/audio/          (created empty; filled by uploads)
+/volume1/sdr-trunk-vtt
 ```
 
-Re-run the seed script after talkgroup CSV or `districts.json` updates if you want the cluster
-catalog/map config refreshed (local auto-add writes the repo file on the Mac, not the NAS).
+Enable NFS (v4.1) for the k3s nodes.
 
-### District map config on NFS
+## 2. Get the image onto the cluster
 
-`districts.json` lists agencies, GeoJSON filenames under `/data/gis`, and talkgroup →
-district mappings. The checked-in `config/districts.json` (Denver/Aurora) is the default.
-For another municipality, replace or edit that file on the share and place matching
-`.geojson` files in `/data/gis` — see the main README “District map (pluggable GIS)”
-section (including KML → GeoJSON conversion). Omit agencies/files to hide the map.
+Nodes are **linux/arm64** (Raspberry Pi) with **Docker** runtime — use `docker load`, not `k3s ctr`.
+
+`deployment.yaml` pins `nodeSelector: kubernetes.io/hostname: k3s-node1` and
+`imagePullPolicy: IfNotPresent`.
+
+### Option B — push to GHCR
+
+Tag and push `ghcr.io/YOUR_USER/trunk-recorder-vtt:latest`, update `kustomization.yaml`
+`newName`/`newTag`, and add `imagePullSecrets` to the Deployment.
+
+## 3. Seed config onto NFS
+
+Use `./deploy/k8s/seed-via-node.sh` (preferred from Mac).
 
 ## 4. Apply to the cluster
 
@@ -112,35 +91,20 @@ kubectl -n sdr-trunk-vtt rollout status deploy/trunk-recorder-vtt
 kubectl -n sdr-trunk-vtt get svc trunk-recorder-vtt-tcp
 ```
 
-Note the LoadBalancer EXTERNAL-IP (same MetalLB/klipper pool as open-webui,
-`192.168.8.x`). The Service listens on **8088** externally (container still
-8080) so it does not collide with open-webui’s host port 8080.
-
-Until EXTERNAL-IP is assigned you can also use the NodePort, e.g.
-`http://192.168.8.204:<nodePort>`.
-
 ## 5. Point Trunk Recorder at the remote VTT
 
 On the Mac:
 
 ```bash
-export VTT_API_URL=http://<EXTERNAL-IP>:8088
-export VTT_API_KEY='(same as API_KEY secret)'
-# upload.sh + tr-encrypted-relay.py already use these
+export VTT_API_URL=http://192.168.8.204:8088
+export VTT_API_KEY='(same as API_KEY in .env / Secret)'
 ```
 
-Health check:
+## Postgres cutover
 
-```bash
-curl -sS "http://<EXTERNAL-IP>:8088/health"
-```
+See main README and `docs/postgres-schema.sql`. Secret: `./deploy/k8s/create-secret.sh`.
 
 ## Site branding
 
-Edit `configmap-env.yaml` (or patch the ConfigMap) for another municipality:
-
-- `SITE_TITLE` / `SITE_SUBTITLE` / optional `SITE_NOTICE`
-- `RECORDS_REQUEST_ENABLED` and `RECORDS_REQUEST_BUTTON_LABEL` (`CORA`, `FOIA`, …)
-- `SITE_SHOW_RECORDS_HELP` — talkgroup-ID help link when the records helper is on
-
-Then `kubectl apply -k deploy/k8s` and restart the deployment. Rebuild the image only when application code changes.
+Edit `configmap-env.yaml`, then `kubectl apply -k deploy/k8s` and
+`kubectl -n sdr-trunk-vtt rollout restart deploy/trunk-recorder-vtt`.

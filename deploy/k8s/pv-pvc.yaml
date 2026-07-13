@@ -1,4 +1,4 @@
-# Static NFS volume — mirrors open-webui (Synology at 192.168.1.162).
+# Static NFS volume 
 # Create the shared folder on the NAS first: /volume1/sdr-trunk-vtt
 ---
 apiVersion: v1
